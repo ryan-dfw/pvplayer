@@ -1,39 +1,33 @@
-use anyhow::{Context, Result, bail};
-use std::io::{BufRead, BufReader};
-use std::net::TcpStream;
+use anyhow::Result;
 use std::process::ExitCode;
-use std::time::Duration;
+use pvplay::mpd::MpdClient;
 
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("{}", e);
+            eprintln!("{:#}", e);
             ExitCode::FAILURE
         }
     }
 }
 
 fn run() -> Result<()> {
-    let stream = TcpStream::connect("localhost:6600")
-        .context("Couldn't connect to MPD")?;
+    let mut client = MpdClient::connect("localhost:6600")?;
+    let status = client.get_status()?;
 
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .context("Couldn't set MPD read timeout")?;
+    match status.next_song_id {
+        Some(id) => {
+            let song = client.get_song(id)?;
 
-    let mut reader = BufReader::new(stream);
-    let mut greeting= String::new();
+            let title = song.title
+                .as_deref()
+                .unwrap_or(&song.file);
 
-    let bytes_read = reader
-        .read_line(&mut greeting)
-        .context("Couldn't read MPD's greeting")?;
-
-    if bytes_read == 0 {
-        bail!("MPD closed the connection before sending a greeting");
+            println!("Next up: {}", title);
+        }
+        None => println!("No next song reported"),
     }
-
-    print!("{}", greeting);
 
     Ok(())
 }
