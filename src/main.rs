@@ -1,6 +1,7 @@
 use anyhow::Result;
+use pvplay::mpd::client::MpdClient;
+use pvplay::pv_link::PvLink;
 use std::process::ExitCode;
-use pvplay::mpd::MpdClient;
 
 fn main() -> ExitCode {
     match run() {
@@ -25,6 +26,16 @@ fn run() -> Result<()> {
                 .unwrap_or(&song.file);
 
             println!("Next up: {}", title);
+
+            let stickers = client.get_stickers(&song.file)?;
+
+            match PvLink::from_stickers(&song.file, &stickers) {
+                Some(pv) => {
+                    println!("PV: {}", pv.path.display());
+                    println!("Start offset: {} ms", pv.start_offset_ms);
+                }
+                None => println!("No playable PV link"),
+            }
         }
         None => println!("No next song reported"),
     }
