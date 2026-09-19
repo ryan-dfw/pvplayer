@@ -1,1 +1,9 @@
-
+.idea
+.vscode/
+*.swp
+*.swo
+*.env
+*.tmp
+*.log
+.DS_Store
+/target/
