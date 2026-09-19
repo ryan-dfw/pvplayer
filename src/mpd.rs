@@ -4,7 +4,7 @@ mod status;
 
 pub use client::MpdClient;
 pub use song::Song;
-pub use status::Status;
+pub use status::{PlaybackState, Status};
 
 #[cfg(test)]
 mod tests;
