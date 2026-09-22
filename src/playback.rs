@@ -1,5 +1,7 @@
 use std::thread;
 use std::time::Duration;
+
+use crate::mpv::Mpv;
 use crate::mpd::{MpdClient, PlaybackState};
 use crate::pv_link::PvLink;
 use crate::timing::seconds_until_pv;
@@ -8,9 +10,10 @@ use anyhow::Result;
 
 pub fn run() -> Result<()> {
     let mut client = MpdClient::connect("localhost:6600")?;
+    let mut mpv = Mpv::start()?;
     let mut previous_next_id: Option<u32> = None;
     let mut upcoming_pv: Option<PvLink> = None;
-
+    let mut previous_display = String::new();
 
     loop {
         let status = client.get_status()?;
@@ -28,8 +31,11 @@ pub fn run() -> Result<()> {
                 let stickers = client.get_stickers(&song.file)?;
                 upcoming_pv = PvLink::from_stickers(&song.file, &stickers);
 
-                if upcoming_pv.is_none() {
-                    println!("No playable PV link");
+                if let Some(pv) = &upcoming_pv {
+                    println!("Preloading PV: {}", pv.path.display());
+                    mpv.load_paused(&pv.path)?;
+                } else {
+                    println!("No playable PV link")
                 }
             } else {
                 println!("No next song reported");
@@ -54,16 +60,23 @@ pub fn run() -> Result<()> {
                 };
 
                 if let Some(activity) = activity {
-                    if remaining >= 0.0 {
-                        println!(
-                            "{} - PV begins in {:.3} playback seconds",
-                            activity, remaining
-                        );
+                    let display = if remaining >= 0.0 {
+                        format!(
+                            "{} - PV begins in {:.0} playback seconds",
+                            activity,
+                            remaining.ceil(),
+                        )
                     } else {
-                        println!(
-                            "{} - intended upcoming PV position: {:.3} seconds",
-                            activity, -remaining
-                        );
+                        format!(
+                            "{} - intended PV position: {:.0} seconds",
+                            activity,
+                            (-remaining).floor(),
+                        )
+                    };
+
+                    if display != previous_display {
+                        println!("{}", display);
+                        previous_display = display;
                     }
                 }
             }

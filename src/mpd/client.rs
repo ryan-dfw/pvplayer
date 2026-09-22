@@ -68,8 +68,6 @@ impl MpdClient {
         let response = self.command("status")
             .context("Couldn't get MPD status")?;
 
-        eprintln!("MPD STATUS: {:?}", response);
-
         Status::parse(&response)
             .context("Couldn't parse MPD status")
 
