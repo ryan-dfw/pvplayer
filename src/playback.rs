@@ -14,10 +14,13 @@ pub fn run() -> Result<()> {
     let mut previous_next_id: Option<u32> = None;
     let mut upcoming_pv: Option<PvLink> = None;
     let mut previous_display = String::new();
+    let mut upcoming_started = false;
 
     loop {
         let status = client.get_status()?;
         if status.next_song_id != previous_next_id {
+            upcoming_started = false;
+            previous_display.clear();
             upcoming_pv = None;
 
             if let Some(id) = status.next_song_id {
@@ -52,6 +55,16 @@ pub fn run() -> Result<()> {
                     elapsed,
                     pv.start_offset_ms
                 );
+
+                if remaining <= 0.0
+                    && matches!(status.state, Some(PlaybackState::Playing))
+                    && !upcoming_started
+                {
+                    mpv.play()?;
+                    upcoming_started = true;
+                    println!("Started PV");
+                }
+
 
                 let activity = match status.state {
                     Some(PlaybackState::Playing) => Some("Playing"),

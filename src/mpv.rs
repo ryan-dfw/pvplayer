@@ -26,6 +26,7 @@ impl Mpv {
         }
 
         let child = Command::new("mpv")
+            .arg("--no-audio")
             .arg("--idle=yes")
             .arg("--pause")
             .arg(format!("--input-ipc-server={SOCKET_PATH}"))
@@ -127,6 +128,10 @@ impl Mpv {
 
             return Ok(());
         }
+    }
+
+    pub fn play(&mut self) -> Result<()> {
+        self.send(json!(["set_property", "pause", false]))
     }
 }
 
