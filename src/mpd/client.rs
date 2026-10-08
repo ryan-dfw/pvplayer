@@ -64,6 +64,22 @@ impl MpdClient {
         Ok(Self { reader })
     }
 
+    pub fn connect_for_events(address: &str) -> anyhow::Result<Self> {
+        let client = Self::connect(address)?;
+        client
+            .reader
+            .get_ref()
+            .set_read_timeout(None)
+            .context("Couldn't disable the MPD event read timeout")?;
+        Ok(client)
+    }
+
+    pub fn wait_for_change(&mut self) -> anyhow::Result<()> {
+        self.command("idle player playlist")
+            .context("Couldn't wait for an MPD change")?;
+        Ok(())
+    }
+
     pub fn get_status(&mut self) -> anyhow::Result<Status> {
         let response = self.command("status")
             .context("Couldn't get MPD status")?;

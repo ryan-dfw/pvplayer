@@ -31,6 +31,8 @@ impl Mpv {
             .arg("--pause")
             .arg(format!("--input-ipc-server={SOCKET_PATH}"))
             .arg("--msg-level=all=warn")
+            .arg("--no-input-default-bindings")
+            .arg("--no-osc")
             .stdin(Stdio::null())
             .spawn()
             .context("Couldn't start mpv")?;
@@ -133,6 +135,15 @@ impl Mpv {
     pub fn play(&mut self) -> Result<()> {
         self.send(json!(["set_property", "pause", false]))
     }
+
+    pub fn pause(&mut self) -> Result<()> {
+        self.send(json!(["set_property", "pause", true]))
+    }
+
+    pub fn seek_absolute(&mut self, seconds: f64) -> Result<()> {
+        self.send(json!(["seek", seconds, "absolute+exact"]))
+    }
+
 }
 
 impl Drop for Mpv {
