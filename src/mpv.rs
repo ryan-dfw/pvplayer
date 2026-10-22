@@ -1,11 +1,11 @@
-use anyhow::{bail, Context, Result};
-use serde_json::{json, Value};
-use std::{fs, thread};
+use anyhow::{Context, Result, bail};
+use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
+use std::{fs, thread};
 
 const SOCKET_PATH: &str = "/tmp/pvplay-mpv.sock";
 
@@ -21,8 +21,7 @@ impl Mpv {
 
         // clean up if exists earlier crashed run
         if socket_path.exists() {
-            fs::remove_file(socket_path)
-                .context("Couldn't remove stale mpv IPC socket")?;
+            fs::remove_file(socket_path).context("Couldn't remove stale mpv IPC socket")?;
         }
 
         let child = Command::new("mpv")
@@ -36,7 +35,6 @@ impl Mpv {
             .stdin(Stdio::null())
             .spawn()
             .context("Couldn't start mpv")?;
-
 
         let mut socket = None;
 
@@ -68,9 +66,7 @@ impl Mpv {
     }
 
     pub fn load_paused(&mut self, path: &Path) -> Result<()> {
-        let path = path
-            .to_str()
-            .context("PV path is not valid UTF-8")?;
+        let path = path.to_str().context("PV path is not valid UTF-8")?;
 
         self.send(json!(["set_property", "pause", true]))?;
         self.send(json!(["loadfile", path, "replace"]))?;
@@ -79,7 +75,7 @@ impl Mpv {
     }
 
     fn send(&mut self, command: Value) -> Result<()> {
-       let request_id = self.next_request_id;
+        let request_id = self.next_request_id;
         self.next_request_id += 1;
 
         let request = json!({
@@ -98,7 +94,8 @@ impl Mpv {
         loop {
             let mut line = String::new();
 
-            let bytes_read = self.socket
+            let bytes_read = self
+                .socket
                 .read_line(&mut line)
                 .context("Couldn't read mpv response")?;
 
@@ -106,16 +103,14 @@ impl Mpv {
                 bail!("MPV closed its IPC connection");
             }
 
-            let response: Value = serde_json::from_str(&line)
-                .context("mpv returned invalid JSON")?;
+            let response: Value =
+                serde_json::from_str(&line).context("mpv returned invalid JSON")?;
 
             if response.get("event").is_some() {
                 continue;
             }
 
-            if response.get("request_id").and_then(Value::as_u64)
-                != Some(request_id)
-            {
+            if response.get("request_id").and_then(Value::as_u64) != Some(request_id) {
                 continue;
             }
 
@@ -143,7 +138,6 @@ impl Mpv {
     pub fn seek_absolute(&mut self, seconds: f64) -> Result<()> {
         self.send(json!(["seek", seconds, "absolute+exact"]))
     }
-
 }
 
 impl Drop for Mpv {

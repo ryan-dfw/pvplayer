@@ -5,10 +5,7 @@ use std::path::{Path, PathBuf};
 
 const MUSIC_ROOT: &str = "/Volumes/Elm_SSD/0/iTunes Media/Music";
 
-pub(super) fn resolve_pv_path(
-    song_uri: &str,
-    pv_filename: &str,
-) -> Option<PathBuf> {
+pub(super) fn resolve_pv_path(song_uri: &str, pv_filename: &str) -> Option<PathBuf> {
     let track_path = Path::new(MUSIC_ROOT).join(song_uri);
     let artist_dir = track_path.parent()?.parent()?;
     let artist_name = artist_dir.file_name()?.to_str()?;

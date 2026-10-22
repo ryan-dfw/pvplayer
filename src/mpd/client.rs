@@ -22,7 +22,8 @@ impl MpdClient {
         loop {
             let mut line = String::new();
 
-            let bytes_read = self.reader
+            let bytes_read = self
+                .reader
                 .read_line(&mut line)
                 .context("Couldn't read from MPD")?;
 
@@ -81,30 +82,25 @@ impl MpdClient {
     }
 
     pub fn get_status(&mut self) -> anyhow::Result<Status> {
-        let response = self.command("status")
-            .context("Couldn't get MPD status")?;
+        let response = self.command("status").context("Couldn't get MPD status")?;
 
-        Status::parse(&response)
-            .context("Couldn't parse MPD status")
-
+        Status::parse(&response).context("Couldn't parse MPD status")
     }
 
     pub fn get_song(&mut self, id: u32) -> anyhow::Result<Song> {
-        let response = self.command(&format!("playlistid {}", id))
+        let response = self
+            .command(&format!("playlistid {}", id))
             .with_context(|| format!("Couldn't get song {}", id))?;
 
-        Song::parse(&response)
-            .context("Couldn't parse song details")
+        Song::parse(&response).context("Couldn't parse song details")
     }
 
     pub fn get_stickers(&mut self, uri: &str) -> anyhow::Result<Vec<String>> {
-        if uri.contains('\n') || uri. contains('\r') {
+        if uri.contains('\n') || uri.contains('\r') {
             bail!("URI contains a newline");
         }
 
-        let escaped_ui = uri
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"");
+        let escaped_ui = uri.replace('\\', "\\\\").replace('"', "\\\"");
 
         self.command(&format!("sticker list song \"{}\"", escaped_ui))
             .context("Couldn't get song stickers")

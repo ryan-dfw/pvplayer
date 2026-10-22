@@ -9,8 +9,7 @@ fn parses_song_details() {
         String::from("Id: 2\n"),
     ];
 
-    let song = Song::parse(&lines)
-        .expect("valid song details should parse");
+    let song = Song::parse(&lines).expect("valid song details should parse");
 
     assert_eq!(song.file, "music/example.mp3");
     assert_eq!(song.title.as_deref(), Some("Example Song"));
@@ -56,12 +55,9 @@ fn rejects_invalid_next_song_id() {
 
 #[test]
 fn song_without_title_is_valid() {
-    let lines = vec![
-        String::from("file: music/untitled.mp3\n"),
-    ];
+    let lines = vec![String::from("file: music/untitled.mp3\n")];
 
-    let song = Song::parse(&lines)
-        .expect("a song without a title should parse");
+    let song = Song::parse(&lines).expect("a song without a title should parse");
 
     assert_eq!(song.file, "music/untitled.mp3");
     assert_eq!(song.title, None);
@@ -69,9 +65,7 @@ fn song_without_title_is_valid() {
 
 #[test]
 fn song_without_file_is_rejected() {
-    let lines = vec![
-        String::from("Title: Example Song\n"),
-    ];
+    let lines = vec![String::from("Title: Example Song\n")];
 
     assert!(Song::parse(&lines).is_err());
 }

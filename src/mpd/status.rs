@@ -1,11 +1,11 @@
-use std::time::Duration;
 use anyhow::{Context, Result};
+use std::time::Duration;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum PlaybackState {
     Playing,
     Paused,
-    Stopped
+    Stopped,
 }
 
 #[derive(Debug, Default)]
@@ -22,11 +22,12 @@ impl Status {
     pub(super) fn parse(lines: &[String]) -> anyhow::Result<Self> {
         let mut status = Self::default();
 
-        for line in lines{
-
+        for line in lines {
             if let Some(value) = line.strip_prefix("songid: ") {
                 status.song_id = Some(
-                    value.trim().parse::<u32>()
+                    value
+                        .trim()
+                        .parse::<u32>()
                         .context("MPD returned an invalid current song ID")?,
                 );
             }
@@ -44,15 +45,15 @@ impl Status {
                     "play" => PlaybackState::Playing,
                     "pause" => PlaybackState::Paused,
                     "stop" => PlaybackState::Stopped,
-                    other => anyhow::bail!(
-                        "MPD returned an unknown playback state: {}", other
-                    )
+                    other => anyhow::bail!("MPD returned an unknown playback state: {}", other),
                 });
             }
 
             if let Some(value) = line.strip_prefix("nextsongid: ") {
                 status.next_song_id = Some(
-                    value.trim().parse::<u32>()
+                    value
+                        .trim()
+                        .parse::<u32>()
                         .context("MPD returned an invalid next song id")?,
                 );
             }
@@ -64,7 +65,8 @@ impl Status {
                     .context("MPD audio field is missing its separator")?;
 
                 status.sample_rate_hz = Some(
-                    sample_rate.parse::<u32>()
+                    sample_rate
+                        .parse::<u32>()
                         .context("MPD returned an invalid sample rate")?,
                 );
             }

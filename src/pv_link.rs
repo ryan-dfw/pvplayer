@@ -11,10 +11,7 @@ pub struct PvLink {
 }
 
 impl PvLink {
-    pub fn from_stickers(
-        song_uri: &str,
-        stickers: &[String],
-    ) -> Option<Self> {
+    pub fn from_stickers(song_uri: &str, stickers: &[String]) -> Option<Self> {
         let mut filename = None;
         let mut start_offset_ms = None;
 
@@ -23,10 +20,7 @@ impl PvLink {
                 continue;
             };
 
-            let Some((name, value)) = sticker
-                .trim_end_matches('\n')
-                .split_once('=')
-            else {
+            let Some((name, value)) = sticker.trim_end_matches('\n').split_once('=') else {
                 continue;
             };
 

@@ -3,11 +3,11 @@ use anyhow::Context;
 #[derive(Debug)]
 pub struct Song {
     pub file: String,
-    pub title: Option<String>
+    pub title: Option<String>,
 }
 
 impl Song {
-    pub (super) fn parse(lines: &[String]) -> anyhow::Result<Self> {
+    pub(super) fn parse(lines: &[String]) -> anyhow::Result<Self> {
         let mut file = None;
         let mut title = None;
 
@@ -25,7 +25,7 @@ impl Song {
 
         Ok(Self {
             file: file.context("MPD song response is missing its file")?,
-            title
+            title,
         })
     }
 }
