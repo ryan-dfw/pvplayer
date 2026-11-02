@@ -44,7 +44,7 @@ enum NextSongUpdate {
 enum PlaybackAction {
     Start,
     Pause { seek_to: Option<f64> },
-    Resume
+    Resume,
 }
 
 #[derive(Debug)]
@@ -108,15 +108,13 @@ impl PlaybackController {
     }
 
     fn staged_seconds_until_start(&self, status: &Status) -> Option<f64> {
-        let PvPhase::Staged{ link, .. } = &self.phase else { return None } ;
+        let PvPhase::Staged { link, .. } = &self.phase else {
+            return None;
+        };
         let duration = status.duration?;
         let elapsed = status.elapsed?;
 
-        Some(seconds_until_pv(
-            duration,
-            elapsed,
-            link.start_offset_ms
-        ))
+        Some(seconds_until_pv(duration, elapsed, link.start_offset_ms))
     }
 
     fn next_check_delay(&self, status: &Status) -> Duration {
@@ -136,24 +134,26 @@ impl PlaybackController {
             .clamp(START_TIMING_RESOLUTION, MAX_RECHECK_INTERVAL)
     }
 
-    fn display_update(&mut self, status: &Status) -> Option<String>{
+    fn display_update(&mut self, status: &Status) -> Option<String> {
         let remaining = self.staged_seconds_until_start(status)?;
 
         let activity = match &status.state {
             Some(PlaybackState::Playing) => "Playing",
             Some(PlaybackState::Paused) => "Paused",
-            _ => return None
+            _ => return None,
         };
 
         let display = if remaining >= 0.0 {
             format!(
                 "{} - PV begins in {:.0} playback seconds",
-                activity, remaining.ceil()
+                activity,
+                remaining.ceil()
             )
         } else {
             format!(
                 "{} - intended PV position: {:.0} seconds",
-                activity, (-remaining).floor()
+                activity,
+                (-remaining).floor()
             )
         };
 
@@ -166,29 +166,24 @@ impl PlaybackController {
     }
 
     fn next_action(&mut self, status: &Status) -> Option<PlaybackAction> {
-        let should_start = matches!(
-            &status.state,
-            Some(PlaybackState::Playing)
-        ) && self
-            .staged_seconds_until_start(status)
-            .is_some_and(|remaining| remaining <= 0.0);
+        let should_start = matches!(&status.state, Some(PlaybackState::Playing))
+            && self
+                .staged_seconds_until_start(status)
+                .is_some_and(|remaining| remaining <= 0.0);
 
         if should_start {
-            let phase = std::mem::replace(
-                &mut self.phase,
-                PvPhase::Empty
-            );
+            let phase = std::mem::replace(&mut self.phase, PvPhase::Empty);
 
             self.phase = match phase {
                 PvPhase::Staged {
                     target_song_id,
-                    link
+                    link,
                 } => PvPhase::Active {
                     target_song_id,
                     start_offset_ms: link.start_offset_ms,
                     video_state: VideoState::Playing,
                 },
-                other => other
+                other => other,
             };
 
             return Some(PlaybackAction::Start);
@@ -203,21 +198,16 @@ impl PlaybackController {
                 },
                 Some(PlaybackState::Paused),
             ) if *video_state == VideoState::Playing => {
-                let seek_to = intended_video_position(
-                    status,
-                    *target_song_id,
-                    *start_offset_ms
-                );
+                let seek_to = intended_video_position(status, *target_song_id, *start_offset_ms);
 
                 *video_state = VideoState::Paused;
 
-                Some(PlaybackAction::Pause { seek_to})
+                Some(PlaybackAction::Pause { seek_to })
             }
 
-            (
-                PvPhase::Active { video_state, .. },
-                Some(PlaybackState::Playing),
-            ) if *video_state == VideoState::Paused => {
+            (PvPhase::Active { video_state, .. }, Some(PlaybackState::Playing))
+                if *video_state == VideoState::Paused =>
+            {
                 *video_state = VideoState::Playing;
                 Some(PlaybackAction::Resume)
             }
@@ -356,11 +346,14 @@ pub fn run() -> Result<()> {
 }
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use super::{intended_video_position, NextSongUpdate, PlaybackAction, PlaybackController, PvPhase, VideoState};
+    use super::{
+        NextSongUpdate, PlaybackAction, PlaybackController, PvPhase, VideoState,
+        intended_video_position,
+    };
     use crate::mpd::{PlaybackState, Status};
-    use std::time::Duration;
     use crate::pv_link::PvLink;
+    use std::path::PathBuf;
+    use std::time::Duration;
 
     #[test]
     fn calculates_position_for_current_song() {
@@ -477,9 +470,9 @@ mod tests {
         };
 
         assert_eq!(
-        controller.next_action(&ready_to_start),
-        Some(PlaybackAction::Start),
-    );
+            controller.next_action(&ready_to_start),
+            Some(PlaybackAction::Start),
+        );
 
         let paused = Status {
             song_id: Some(42),
@@ -489,11 +482,11 @@ mod tests {
         };
 
         assert_eq!(
-        controller.next_action(&paused),
-        Some(PlaybackAction::Pause {
-            seek_to: Some(13.0),
-        }),
-    );
+            controller.next_action(&paused),
+            Some(PlaybackAction::Pause {
+                seek_to: Some(13.0),
+            }),
+        );
 
         let resumed = Status {
             song_id: Some(42),
@@ -502,8 +495,8 @@ mod tests {
         };
 
         assert_eq!(
-        controller.next_action(&resumed),
-        Some(PlaybackAction::Resume),
-    );
+            controller.next_action(&resumed),
+            Some(PlaybackAction::Resume),
+        );
     }
 }

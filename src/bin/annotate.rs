@@ -1,20 +1,79 @@
+use id3::{Tag, TagLike};
+use pvplay::{mpd::MpdClient, pv_link::PvLink};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use dialoguer::{console::Style, FuzzySelect};
-use id3::{Tag, TagLike};
-use pvplay::{mpd::MpdClient, pv_link::PvLink};
+use dialoguer::{
+    Confirm, FuzzySelect, Input,
+    console::{Style, measure_text_width}
+};
 
 const MUSIC_ROOT: &str = "/Volumes/Elm_SSD/0/iTunes Media/Music/";
 
 type PvCandidates = HashMap<String, Vec<PathBuf>>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PvStatus {
-    Associated,
-    Ready,
+#[derive(Debug)]
+enum PvMatch {
+    Associated(PvLink),
+    Ready(PathBuf),
     Unavailable,
-    Ambiguous
+    Ambiguous(Vec<PathBuf>),
+}
+
+#[derive(Debug)]
+struct SongChoice {
+    audio_path: PathBuf,
+    uri: String,
+    title: String,
+    track: Option<u32>,
+    pv_match: PvMatch,
+}
+
+impl SongChoice {
+    fn label(&self) -> String {
+        match self.track {
+            Some(number) => format!("{number:02}- {}", self.title),
+            None => self.title.clone(),
+        }
+    }
+
+    fn display_name(&self, label_width: usize) -> String {
+        let label = self.label();
+
+        match &self.pv_match {
+            PvMatch::Associated(link) => {
+                let padding =
+                    " ".repeat(label_width.saturating_sub(measure_text_width(&label)));
+                let offset = format_start_offset(link.start_offset_ms);
+
+                Style::new()
+                    .for_stderr()
+                    .blue()
+                    .apply_to(format!(" {label}{padding}  {offset}"))
+                    .to_string()
+            }
+
+            PvMatch::Ready(_) => Style::new()
+                .for_stderr()
+                .color256(208)
+                .apply_to(format!(" {label}"))
+                .to_string(),
+
+            PvMatch::Unavailable => format!("  {label}"),
+
+            PvMatch::Ambiguous(_) => Style::new()
+                .for_stderr()
+                .red()
+                .apply_to(format!(" {label}"))
+                .to_string(),
+        }
+    }
+}
+
+fn format_start_offset(milliseconds: i64) -> String {
+    let sign = if milliseconds < 0 { '-' } else { ' ' };
+    let magnitude = milliseconds.unsigned_abs();
+    format!("in:{sign}{magnitude:04}ms")
 }
 
 fn match_key(value: &str) -> String {
@@ -28,11 +87,10 @@ fn match_key(value: &str) -> String {
 fn title_from_pv_stem(stem: &str) -> &str {
     match stem.split_once(' ') {
         Some((prefix, title))
-        if !prefix.is_empty()
-            && prefix
-            .chars()
-            .all(|character| character.is_ascii_digit()) =>
-            { title }
+            if !prefix.is_empty() && prefix.chars().all(|character| character.is_ascii_digit()) =>
+        {
+            title
+        }
         _ => stem,
     }
 }
@@ -55,48 +113,51 @@ fn load_pv_candidates(artist: &Path) -> anyhow::Result<PvCandidates> {
 
         if !path.is_file()
             || !path
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
             || path
-            .file_name()
-            .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with('.'))
         {
             continue;
         }
 
-        let Some(stem) = path.file_stem() else { continue; };
+        let Some(stem) = path.file_stem() else {
+            continue;
+        };
 
         let stem = stem.to_string_lossy();
         let title = title_from_pv_stem(stem.as_ref());
         let key = match_key(title);
 
-        if !key.is_empty() { candidates.entry(key).or_default().push(path); }
+        if !key.is_empty() {
+            candidates.entry(key).or_default().push(path);
+        }
     }
 
     Ok(candidates)
 }
 
-fn classify_pv(
+fn match_pv(
     song_uri: &str,
     title: &str,
     stickers: &[String],
     pv_candidates: &PvCandidates,
-) -> PvStatus {
-    if PvLink::from_stickers(song_uri, stickers).is_some() {
-        return PvStatus::Associated;
+) -> PvMatch {
+    if let Some(link) = PvLink::from_stickers(song_uri, stickers) {
+        return PvMatch::Associated(link);
     }
 
-    let candidate_count = pv_candidates
-        .get(&match_key(title))
-        .map_or(0, Vec::len);
+    let Some(candidates) = pv_candidates.get(&match_key(title)) else {
+        return PvMatch::Unavailable;
+    };
 
-    match candidate_count {
-        0 => PvStatus::Unavailable,
-        1 => PvStatus::Ready,
-        _ => PvStatus::Ambiguous,
+    match candidates.as_slice() {
+        [] => PvMatch::Unavailable,
+        [candidate] => PvMatch::Ready(candidate.clone()),
+        candidates => PvMatch::Ambiguous(candidates.to_vec()),
     }
 }
-
 
 fn main() -> anyhow::Result<()> {
     let root = Path::new(MUSIC_ROOT);
@@ -106,7 +167,7 @@ fn main() -> anyhow::Result<()> {
     let mut client = MpdClient::connect("localhost:6600")?;
     let song = choose_song(&album, &mut client, &pv_candidates)?;
 
-    println!("Selected: {}", song.display());
+    annotate_song(&mut client, &song)?;
 
     Ok(())
 }
@@ -117,8 +178,9 @@ fn choose_directory(parent: &Path, prompt: &str) -> anyhow::Result<PathBuf> {
         .map(|entry| entry.path())
         .filter(|path| {
             path.is_dir()
-                && !path.file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+                && !path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with('.'))
         })
         .collect();
 
@@ -126,12 +188,7 @@ fn choose_directory(parent: &Path, prompt: &str) -> anyhow::Result<PathBuf> {
 
     let names: Vec<String> = directories
         .iter()
-        .map( |path| {
-            path.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned()
-        })
+        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
 
     let selection = FuzzySelect::new()
@@ -143,12 +200,8 @@ fn choose_directory(parent: &Path, prompt: &str) -> anyhow::Result<PathBuf> {
 }
 
 fn choose_album(artist: &Path) -> anyhow::Result<PathBuf> {
-    let mut pv_directory_name = artist
-        .file_name()
-        .unwrap_or_default()
-        .to_os_string();
+    let mut pv_directory_name = artist.file_name().unwrap_or_default().to_os_string();
     pv_directory_name.push(" [pv]");
-
 
     let mut albums: Vec<PathBuf> = fs::read_dir(artist)?
         .filter_map(Result::ok)
@@ -157,8 +210,8 @@ fn choose_album(artist: &Path) -> anyhow::Result<PathBuf> {
             path.is_dir()
                 && path.file_name() != Some(pv_directory_name.as_os_str())
                 && !path
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with('.'))
         })
         .collect();
 
@@ -171,11 +224,15 @@ fn choose_album(artist: &Path) -> anyhow::Result<PathBuf> {
             .map(|entry| entry.path())
             .find_map(|path| {
                 if !path.is_file()
-                    || !path.extension()
+                    || !path
+                        .extension()
                         .is_some_and(|ext| ext.eq_ignore_ascii_case("mp3"))
-                    || path.file_name()
+                    || path
+                        .file_name()
                         .is_some_and(|name| name.to_string_lossy().starts_with("._"))
-                { return None; }
+                {
+                    return None;
+                }
 
                 let tag = match Tag::read_from_path(&path) {
                     Ok(tag) => tag,
@@ -190,13 +247,15 @@ fn choose_album(artist: &Path) -> anyhow::Result<PathBuf> {
                     .and_then(|frame| frame.content().text())
                     .map(str::to_owned)
             });
-        sort_album.unwrap_or_else(|| {
-            album.file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned()
-        })
-        .to_lowercase()
+        sort_album
+            .unwrap_or_else(|| {
+                album
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .to_lowercase()
     });
 
     let names: Vec<String> = albums
@@ -220,77 +279,71 @@ fn choose_album(artist: &Path) -> anyhow::Result<PathBuf> {
 fn choose_song(
     album: &Path,
     client: &mut MpdClient,
-    pv_candidates: &PvCandidates
-) -> anyhow::Result<PathBuf> {
+    pv_candidates: &PvCandidates,
+) -> anyhow::Result<SongChoice> {
     let mut songs: Vec<PathBuf> = fs::read_dir(album)?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| {
             path.is_file()
-                && !path.file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with("."))
-                && path.extension()
-                .is_some_and(|ext|ext.eq_ignore_ascii_case("mp3"))
+                && !path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+                && path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("mp3"))
         })
         .collect();
 
     songs.sort();
 
-    let names: Vec<String> = songs
-        .iter()
-        .map(|path| -> anyhow::Result<String> {
-            let tag = Tag::read_from_path(path).ok();
+    let mut choices: Vec<SongChoice> = songs
+        .into_iter()
+        .map(|audio_path| -> anyhow::Result<SongChoice> {
+            let tag = Tag::read_from_path(&audio_path).ok();
 
             let title = tag
                 .as_ref()
-                .and_then(|tag| tag.title())
+                .and_then(TagLike::title)
                 .map(str::to_owned)
                 .unwrap_or_else(|| {
-                    path.file_stem()
+                    audio_path
+                        .file_stem()
                         .unwrap_or_default()
                         .to_string_lossy()
                         .into_owned()
                 });
 
-            let track = tag.as_ref().and_then(|tag| tag.track());
+            let track = tag.as_ref().and_then(TagLike::track);
 
-            let uri = path
+            let uri = audio_path
                 .strip_prefix(Path::new(MUSIC_ROOT))?
-                .to_string_lossy();
+                .to_string_lossy()
+                .into_owned();
 
             let stickers = client.get_stickers(&uri)?;
-            let pv_status = classify_pv(uri.as_ref(), &title, &stickers, pv_candidates);
+            let pv_match = match_pv(&uri, &title, &stickers, pv_candidates);
 
-            let display = match track {
-                Some(number ) => format!("{number:02}- {title}"),
-                None=> title,
-            };
-
-            let display = match pv_status {
-                PvStatus::Associated => Style::new()
-                    .for_stderr()
-                    .blue()
-                    .apply_to(format!(" {display}"))
-                    .to_string(),
-
-                PvStatus::Ready => Style::new()
-                    .for_stderr()
-                    .color256(208)
-                    .apply_to(format!(" {display}"))
-                    .to_string(),
-
-                PvStatus::Unavailable => format!("  {display}"),
-
-                PvStatus::Ambiguous => Style::new()
-                    .for_stderr()
-                    .red()
-                    .apply_to(format!(" {display}"))
-                    .to_string(),
-            };
-
-            Ok(display)
+            Ok(SongChoice {
+                audio_path,
+                uri,
+                title,
+                track,
+                pv_match,
+            })
         })
         .collect::<anyhow::Result<_>>()?;
+
+    let label_width = choices
+        .iter()
+        .map(|choice| measure_text_width(&choice.label()))
+        .max()
+        .unwrap_or(0);
+
+    let names: Vec<String> = choices
+        .iter()
+        .map(|choice| choice.display_name(label_width))
+        .collect();
 
     let selection = FuzzySelect::new()
         .with_prompt("Song")
@@ -298,5 +351,80 @@ fn choose_song(
         .highlight_matches(false)
         .interact()?;
 
-    Ok(songs[selection].clone())
+    Ok(choices.remove(selection))
+}
+
+fn annotate_song(client: &mut MpdClient, song: &SongChoice) -> anyhow::Result<()> {
+    match &song.pv_match {
+        PvMatch::Associated(link) => {
+            println!(
+                "Already associated with {} at {} ms",
+                link.path.display(),
+                link.start_offset_ms
+            );
+        }
+
+        PvMatch::Ready(video_path) => {
+            annotate_ready_song(client, song, video_path)?;
+        }
+
+        PvMatch::Unavailable => {
+            println!("No matching PV was found for {}", song.audio_path.display());
+        }
+
+        PvMatch::Ambiguous(candidates) => {
+            println!(
+                "Found multiple possible PVs for {}:",
+                song.audio_path.display()
+            );
+
+            for candidate in candidates {
+                println!("  {}", candidate.display());
+            }
+
+            println!("No changes made.");
+        }
+    }
+
+    Ok(())
+}
+
+fn annotate_ready_song(
+    client: &mut MpdClient,
+    song: &SongChoice,
+    video_path: &Path,
+) -> anyhow::Result<()> {
+    let pv_filename = video_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("PV filename is not valid UTF-8"))?;
+
+    println!("Song: {}", song.audio_path.display());
+    println!("PV:   {}", video_path.display());
+
+    let start_offset_ms: i64 = Input::new()
+        .with_prompt("Video position where the song begins, in milliseconds")
+        .interact_text()?;
+
+    println!();
+    println!("MPD song: {}", song.uri);
+    println!("pv:       {pv_filename}");
+    println!("pv_in_ms: {start_offset_ms}");
+
+    let confirmed = Confirm::new()
+        .with_prompt("Write these stickers?")
+        .default(false)
+        .interact()?;
+
+    if !confirmed {
+        println!("No changes made.");
+        return Ok(());
+    }
+
+    client.set_sticker(&song.uri, "pv", pv_filename)?;
+    client.set_sticker(&song.uri, "pv_in_ms", &start_offset_ms.to_string())?;
+
+    println!("PV association saved.");
+
+    Ok(())
 }

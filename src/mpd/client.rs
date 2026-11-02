@@ -8,6 +8,14 @@ pub struct MpdClient {
     reader: BufReader<TcpStream>,
 }
 
+fn escape_argument(value: &str) -> anyhow::Result<String> {
+    if value.contains('\n') || value.contains('\r') {
+        bail!("MPD command argument contains a newline");
+    }
+
+    Ok(value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
 impl MpdClient {
     fn command(&mut self, command: &str) -> anyhow::Result<Vec<String>> {
         let request = format!("{}\n", command);
@@ -96,13 +104,22 @@ impl MpdClient {
     }
 
     pub fn get_stickers(&mut self, uri: &str) -> anyhow::Result<Vec<String>> {
-        if uri.contains('\n') || uri.contains('\r') {
-            bail!("URI contains a newline");
-        }
+        let uri = escape_argument(uri)?;
 
-        let escaped_ui = uri.replace('\\', "\\\\").replace('"', "\\\"");
-
-        self.command(&format!("sticker list song \"{}\"", escaped_ui))
+        self.command(&format!("sticker list song \"{uri}\""))
             .context("Couldn't get song stickers")
+    }
+
+    pub fn set_sticker(&mut self, uri: &str, name: &str, value: &str) -> anyhow::Result<()> {
+        let uri = escape_argument(uri)?;
+        let name = escape_argument(name)?;
+        let value = escape_argument(value)?;
+
+        self.command(&format!(
+            "sticker set song \"{uri}\" \"{name}\" \"{value}\""
+        ))
+        .with_context(|| format!("Couldn't set sticker {name}"))?;
+
+        Ok(())
     }
 }
