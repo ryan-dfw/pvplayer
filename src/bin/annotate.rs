@@ -1,14 +1,17 @@
+use anyhow::{bail, Context};
 use id3::{Tag, TagLike};
 use pvplay::{mpd::MpdClient, pv_link::PvLink};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use dialoguer::{
     Confirm, FuzzySelect, Input,
     console::{Style, measure_text_width}
 };
 
 const MUSIC_ROOT: &str = "/Volumes/Elm_SSD/0/iTunes Media/Music/";
+const MPD_ADDRESS: &str = "localhost:6600";
 
 type PvCandidates = HashMap<String, Vec<PathBuf>>;
 
@@ -68,6 +71,121 @@ impl SongChoice {
                 .to_string(),
         }
     }
+}
+
+fn parse_start_offset(input: &str, video_path: &Path) -> anyhow::Result<i64> {
+    let input = input.trim();
+
+    if !input.contains(':') {
+        return input
+            .parse::<i64>()
+            .with_context(|| format!("Invalid millisecond value: {input}"));
+    }
+
+    let frame_rate = probe_frame_rate(video_path)?;
+    timecode_to_milliseconds(input, frame_rate)
+}
+
+fn probe_frame_rate(video_path: &Path) -> anyhow::Result<f64> {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=avg_frame_rate",
+            "-of",
+            "default=nw=1:nk=1",
+        ])
+        .arg(video_path)
+        .output()
+        .with_context(|| {
+            format!("Could not run ffprobe for {}", video_path.display())
+        })?;
+
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr);
+
+        bail!(
+            "ffprobe failed for {}: {}",
+            video_path.display(),
+            error.trim()
+        );
+    }
+
+    let frame_rate = std::str::from_utf8(&output.stdout)?.trim();
+
+    let (numerator, denominator) = frame_rate
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!(
+            "Unexpected ffprobe frame rate: {frame_rate}"
+        ))?;
+
+    let numerator: f64 = numerator.parse()?;
+    let denominator: f64 = denominator.parse()?;
+
+    if numerator <= 0.0 || denominator <= 0.0 {
+        bail!("Invalid frame rate: {frame_rate}");
+    }
+
+    Ok(numerator / denominator)
+}
+
+fn timecode_to_milliseconds(
+    input: &str, frame_rate: f64
+) -> anyhow::Result<i64> {
+    let (negative, input) = match input.strip_prefix('-') {
+        Some(input) => (true, input),
+        None => (false, input),
+    };
+
+    let fields: Vec<u64> = input
+        .split(':')
+        .map(|field| {
+            field
+                .parse::<u64>()
+                .with_context(|| format!("Invalid timecode: {input}"))
+        })
+        .collect::<anyhow::Result<_>>()?;
+
+    let (hours, minutes, seconds, frames) = match fields.as_slice() {
+        [seconds, frames] => (0, 0, *seconds, *frames),
+        [minutes, seconds, frames] => (0, *minutes, *seconds, *frames),
+        [hours, minutes, seconds, frames] => {
+            (*hours, *minutes, *seconds, *frames)
+        }
+
+        _ => bail!(
+            "Use milliseconds or timecode formatted as \
+            ss:ff, mm:ss:ff, or hh:mm:ss:ff"
+        ),
+    };
+
+    if seconds >= 60 && fields.len() >= 3 {
+        bail!("Timecode seconds must be less than 60");
+    }
+
+    if minutes >= 60 && fields.len() >= 4 {
+        bail!("Timecode minutes must be less than 60");
+    }
+
+    let nominal_frame_rate = frame_rate.round() as u64;
+
+    if frames >= nominal_frame_rate {
+        bail!(
+            "Frame number {frames} is invalid for approximately \
+            {nominal_frame_rate} fps"
+        );
+    }
+
+    let whole_seconds = hours * 3600 + minutes * 60 + seconds;
+    let total_frames = whole_seconds * nominal_frame_rate + frames;
+
+    let milliseconds =
+        ((total_frames as f64 / frame_rate) * 1000.0).round() as i64;
+
+    Ok(if negative { -milliseconds } else { milliseconds })
 }
 
 fn format_start_offset(milliseconds: i64) -> String {
@@ -164,11 +282,19 @@ fn main() -> anyhow::Result<()> {
     let artist = choose_directory(root, "Artist")?;
     let pv_candidates = load_pv_candidates(&artist)?;
     let album = choose_album(&artist)?;
-    let mut client = MpdClient::connect("localhost:6600")?;
-    let song = choose_song(&album, &mut client, &pv_candidates)?;
 
-    annotate_song(&mut client, &song)?;
+    loop {
+        let song = {
+            let mut client = MpdClient::connect(MPD_ADDRESS)?;
+            choose_song(&album, &mut client, &pv_candidates)?
+        };
 
+        let Some(song) = song else {
+            break;
+        };
+
+        annotate_song(&song)?;
+    }
     Ok(())
 }
 
@@ -280,7 +406,7 @@ fn choose_song(
     album: &Path,
     client: &mut MpdClient,
     pv_candidates: &PvCandidates,
-) -> anyhow::Result<SongChoice> {
+) -> anyhow::Result<Option<SongChoice>> {
     let mut songs: Vec<PathBuf> = fs::read_dir(album)?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
@@ -349,12 +475,17 @@ fn choose_song(
         .with_prompt("Song")
         .items(&names)
         .highlight_matches(false)
-        .interact()?;
+        .report(false)
+        .interact_opt()?;
 
-    Ok(choices.remove(selection))
+    let Some(selection) = selection else {
+        return Ok(None);
+    };
+
+    Ok(Some(choices.remove(selection)))
 }
 
-fn annotate_song(client: &mut MpdClient, song: &SongChoice) -> anyhow::Result<()> {
+fn annotate_song(song: &SongChoice) -> anyhow::Result<()> {
     match &song.pv_match {
         PvMatch::Associated(link) => {
             println!(
@@ -365,7 +496,7 @@ fn annotate_song(client: &mut MpdClient, song: &SongChoice) -> anyhow::Result<()
         }
 
         PvMatch::Ready(video_path) => {
-            annotate_ready_song(client, song, video_path)?;
+            annotate_ready_song(song, video_path)?;
         }
 
         PvMatch::Unavailable => {
@@ -390,9 +521,8 @@ fn annotate_song(client: &mut MpdClient, song: &SongChoice) -> anyhow::Result<()
 }
 
 fn annotate_ready_song(
-    client: &mut MpdClient,
     song: &SongChoice,
-    video_path: &Path,
+    video_path: &Path
 ) -> anyhow::Result<()> {
     let pv_filename = video_path
         .file_name()
@@ -402,9 +532,12 @@ fn annotate_ready_song(
     println!("Song: {}", song.audio_path.display());
     println!("PV:   {}", video_path.display());
 
-    let start_offset_ms: i64 = Input::new()
-        .with_prompt("Video position where the song begins, in milliseconds")
+    let start_offset_input: String = Input::new()
+        .with_prompt("Song start: ms or [hh:]mm:ss:ff")
         .interact_text()?;
+
+    let start_offset_ms =
+        parse_start_offset(&start_offset_input, video_path)?;
 
     println!();
     println!("MPD song: {}", song.uri);
@@ -420,6 +553,9 @@ fn annotate_ready_song(
         println!("No changes made.");
         return Ok(());
     }
+
+    let mut client = MpdClient::connect(MPD_ADDRESS)
+        .context("Couldn't connect to MPD to write stickers")?;
 
     client.set_sticker(&song.uri, "pv", pv_filename)?;
     client.set_sticker(&song.uri, "pv_in_ms", &start_offset_ms.to_string())?;
