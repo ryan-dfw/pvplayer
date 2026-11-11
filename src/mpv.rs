@@ -13,6 +13,7 @@ pub struct Mpv {
     child: Child,
     socket: BufReader<UnixStream>,
     next_request_id: u64,
+    pending_file_loaded: usize
 }
 
 impl Mpv {
@@ -62,19 +63,28 @@ impl Mpv {
             child,
             socket: BufReader::new(socket),
             next_request_id: 1,
+            pending_file_loaded: 0
         })
     }
 
     pub fn load_paused(&mut self, path: &Path) -> Result<()> {
-        let path = path.to_str().context("PV path is not valid UTF-8")?;
+        let path = path
+            .to_str()
+            .context("PV path is not valid UTF-8")?;
 
-        self.send(json!(["set_property", "pause", true]))?;
-        self.send(json!(["loadfile", path, "replace"]))?;
+        self.send(json!(["set_property", "pause", true]))
+            .context("Couldn't pause mpv before loading")?;
+
+        self.send(json!(["loadfile", path, "replace"]))
+            .context("Couldn't ask mpv to load {path}")?;
+
+        self.wait_until_file_loaded()
+            .with_context(|| format!("mpv couldn't finish loading {path}"))?;
 
         Ok(())
     }
 
-    fn send(&mut self, command: Value) -> Result<()> {
+    fn request(&mut self, command: Value) -> Result<Value> {
         let request_id = self.next_request_id;
         self.next_request_id += 1;
 
@@ -106,7 +116,13 @@ impl Mpv {
             let response: Value =
                 serde_json::from_str(&line).context("mpv returned invalid JSON")?;
 
-            if response.get("event").is_some() {
+            if let Some(event) =
+                response.get("event").and_then(Value::as_str)
+            {
+                if event == "file-loaded" {
+                    self.pending_file_loaded += 1;
+                }
+
                 continue;
             }
 
@@ -123,8 +139,45 @@ impl Mpv {
                 bail!("mpv rejected the command: {}", error);
             }
 
+            return Ok(response);
+        }
+    }
+
+    fn send(&mut self, command: Value) -> Result<()> {
+        self.request(command).map(|_| ())
+    }
+
+    fn wait_until_file_loaded(&mut self) -> Result<()> {
+        if self.pending_file_loaded > 0 {
+            self.pending_file_loaded -= 1;
             return Ok(());
         }
+
+        loop {
+            let mut line = String::new();
+
+            let bytes_read = self
+                .socket
+                .read_line(&mut line)
+                .context("Couldn't read mpv event")?;
+
+            if bytes_read == 0 {
+                bail!("mpv closed IPC while loading a file");
+            }
+
+            let message: Value =
+                serde_json::from_str(&line)
+                    .context("mpv returned invalid JSON")?;
+
+            let Some(event) =
+                message.get("event").and_then(Value::as_str)
+            else { continue };
+
+            if event == "file-loaded" {
+                return Ok(());
+            }
+        };
+
     }
 
     pub fn play(&mut self) -> Result<()> {
@@ -138,7 +191,16 @@ impl Mpv {
     pub fn seek_absolute(&mut self, seconds: f64) -> Result<()> {
         self.send(json!(["seek", seconds, "absolute+exact"]))
     }
-}
+
+    pub fn time_position(&mut self) -> Result<f64> {
+        let response = self.request(json!(["get_property", "time-pos"]))?;
+
+        response
+            .get("data")
+            .and_then(Value::as_f64)
+            .context("mpv response is missing a numeric time-pos")
+        }
+    }
 
 impl Drop for Mpv {
     fn drop(&mut self) {

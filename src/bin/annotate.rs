@@ -205,7 +205,8 @@ fn match_key(value: &str) -> String {
 fn title_from_pv_stem(stem: &str) -> &str {
     match stem.split_once(' ') {
         Some((prefix, title))
-            if !prefix.is_empty() && prefix.chars().all(|character| character.is_ascii_digit()) =>
+            if !prefix.is_empty() &&
+                prefix.chars().all(|character| character.is_ascii_digit()) =>
         {
             title
         }
@@ -549,7 +550,7 @@ fn annotate_ready_song(
         .default(false)
         .interact()?;
 
-    if !confirmed {
+    if !confirmed{
         println!("No changes made.");
         return Ok(());
     }
