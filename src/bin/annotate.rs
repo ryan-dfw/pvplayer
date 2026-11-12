@@ -32,6 +32,13 @@ struct SongChoice {
     pv_match: PvMatch,
 }
 
+#[derive(Debug)]
+enum AlbumPvStatus {
+    Ready,
+    Associated,
+    Unavailable
+}
+
 impl SongChoice {
     fn label(&self) -> String {
         match self.track {
@@ -282,20 +289,16 @@ fn main() -> anyhow::Result<()> {
     let root = Path::new(MUSIC_ROOT);
     let artist = choose_directory(root, "Artist")?;
     let pv_candidates = load_pv_candidates(&artist)?;
-    let album = choose_album(&artist)?;
+
+    let mut client = MpdClient::connect(MPD_ADDRESS)?;
+    let album = choose_album(&artist, &mut client, &pv_candidates)?;
 
     loop {
-        let song = {
-            let mut client = MpdClient::connect(MPD_ADDRESS)?;
-            choose_song(&album, &mut client, &pv_candidates)?
-        };
-
-        let Some(song) = song else {
-            break;
-        };
-
+        let song = choose_song(&album, &mut client, &pv_candidates)?;
+        let Some(song) = song else { break; };
         annotate_song(&song)?;
     }
+
     Ok(())
 }
 
@@ -326,7 +329,11 @@ fn choose_directory(parent: &Path, prompt: &str) -> anyhow::Result<PathBuf> {
     Ok(directories[selection].clone())
 }
 
-fn choose_album(artist: &Path) -> anyhow::Result<PathBuf> {
+fn choose_album(
+    artist: &Path,
+    mpd_client: &mut MpdClient,
+    pv_candidates: &PvCandidates
+) -> anyhow::Result<PathBuf> {
     let mut pv_directory_name = artist.file_name().unwrap_or_default().to_os_string();
     pv_directory_name.push(" [pv]");
 
@@ -387,44 +394,78 @@ fn choose_album(artist: &Path) -> anyhow::Result<PathBuf> {
 
     let names: Vec<String> = albums
         .iter()
-        .map(|path| {
-            path.file_name()
+        .map(|album| -> anyhow::Result<String> {
+            let name = album
+                .file_name()
                 .unwrap_or_default()
                 .to_string_lossy()
-                .into_owned()
+                .into_owned();
+
+            let songs = load_song_choices(album, mpd_client, pv_candidates)?;
+
+            let display_name = match album_pv_status(&songs) {
+                AlbumPvStatus::Ready => Style::new()
+                    .for_stderr()
+                    .color256(208)
+                    .apply_to(name)
+                    .to_string(),
+
+                AlbumPvStatus::Associated => Style::new()
+                    .for_stderr()
+                    .blue()
+                    .apply_to(name)
+                    .to_string(),
+
+                AlbumPvStatus::Unavailable => name,
+            };
+
+            Ok(display_name)
         })
-        .collect();
+        .collect::<anyhow::Result<_>>()?;
 
     let selection = FuzzySelect::new()
         .with_prompt("Album")
         .items(&names)
+        .highlight_matches(false)
         .interact()?;
 
     Ok(albums[selection].clone())
 }
 
-fn choose_song(
+fn album_pv_status(songs: &[SongChoice]) -> AlbumPvStatus {
+    if songs
+        .iter()
+        .any(|song| matches!(&song.pv_match, PvMatch::Ready(_)))
+    { AlbumPvStatus::Ready } else if songs
+        .iter()
+        .any(|song| matches!(&song.pv_match, PvMatch::Associated(_)))
+    {AlbumPvStatus::Associated} else { AlbumPvStatus::Unavailable }
+}
+
+fn load_song_choices(
     album: &Path,
     client: &mut MpdClient,
-    pv_candidates: &PvCandidates,
-) -> anyhow::Result<Option<SongChoice>> {
+    pv_candidates: &PvCandidates
+) -> anyhow::Result<Vec<SongChoice>> {
     let mut songs: Vec<PathBuf> = fs::read_dir(album)?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| {
             path.is_file()
                 && !path
-                    .file_name()
-                    .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+                .file_name()
+                .is_some_and(|name|
+                    name.to_string_lossy().starts_with('.'))
                 && path
-                    .extension()
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("mp3"))
+                .extension()
+                .is_some_and(|extension|
+                    extension.eq_ignore_ascii_case("mp3"))
         })
         .collect();
 
     songs.sort();
 
-    let mut choices: Vec<SongChoice> = songs
+    songs
         .into_iter()
         .map(|audio_path| -> anyhow::Result<SongChoice> {
             let tag = Tag::read_from_path(&audio_path).ok();
@@ -456,10 +497,18 @@ fn choose_song(
                 uri,
                 title,
                 track,
-                pv_match,
+                pv_match
             })
         })
-        .collect::<anyhow::Result<_>>()?;
+        .collect()
+}
+
+fn choose_song(
+    album: &Path,
+    client: &mut MpdClient,
+    pv_candidates: &PvCandidates,
+) -> anyhow::Result<Option<SongChoice>> {
+    let mut choices = load_song_choices(album, client, pv_candidates)?;
 
     let label_width = choices
         .iter()
