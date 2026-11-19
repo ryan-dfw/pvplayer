@@ -13,7 +13,7 @@ pub struct Mpv {
     child: Child,
     socket: BufReader<UnixStream>,
     next_request_id: u64,
-    pending_file_loaded: usize
+    pending_file_loaded: usize,
 }
 
 impl Mpv {
@@ -63,14 +63,12 @@ impl Mpv {
             child,
             socket: BufReader::new(socket),
             next_request_id: 1,
-            pending_file_loaded: 0
+            pending_file_loaded: 0,
         })
     }
 
     pub fn load_paused(&mut self, path: &Path) -> Result<()> {
-        let path = path
-            .to_str()
-            .context("PV path is not valid UTF-8")?;
+        let path = path.to_str().context("PV path is not valid UTF-8")?;
 
         self.send(json!(["set_property", "pause", true]))
             .context("Couldn't pause mpv before loading")?;
@@ -116,9 +114,7 @@ impl Mpv {
             let response: Value =
                 serde_json::from_str(&line).context("mpv returned invalid JSON")?;
 
-            if let Some(event) =
-                response.get("event").and_then(Value::as_str)
-            {
+            if let Some(event) = response.get("event").and_then(Value::as_str) {
                 if event == "file-loaded" {
                     self.pending_file_loaded += 1;
                 }
@@ -166,18 +162,16 @@ impl Mpv {
             }
 
             let message: Value =
-                serde_json::from_str(&line)
-                    .context("mpv returned invalid JSON")?;
+                serde_json::from_str(&line).context("mpv returned invalid JSON")?;
 
-            let Some(event) =
-                message.get("event").and_then(Value::as_str)
-            else { continue };
+            let Some(event) = message.get("event").and_then(Value::as_str) else {
+                continue;
+            };
 
             if event == "file-loaded" {
                 return Ok(());
             }
-        };
-
+        }
     }
 
     pub fn play(&mut self) -> Result<()> {
@@ -199,8 +193,8 @@ impl Mpv {
             .get("data")
             .and_then(Value::as_f64)
             .context("mpv response is missing a numeric time-pos")
-        }
     }
+}
 
 impl Drop for Mpv {
     fn drop(&mut self) {

@@ -1,14 +1,14 @@
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
+use dialoguer::{
+    Confirm, FuzzySelect, Input,
+    console::{Style, measure_text_width},
+};
 use id3::{Tag, TagLike};
 use pvplay::{mpd::MpdClient, pv_link::PvLink};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use dialoguer::{
-    Confirm, FuzzySelect, Input,
-    console::{Style, measure_text_width}
-};
 
 const MUSIC_ROOT: &str = "/Volumes/Elm_SSD/0/iTunes Media/Music/";
 const MPD_ADDRESS: &str = "localhost:6600";
@@ -36,7 +36,7 @@ struct SongChoice {
 enum AlbumPvStatus {
     Ready,
     Associated,
-    Unavailable
+    Unavailable,
 }
 
 impl SongChoice {
@@ -52,8 +52,7 @@ impl SongChoice {
 
         match &self.pv_match {
             PvMatch::Associated(link) => {
-                let padding =
-                    " ".repeat(label_width.saturating_sub(measure_text_width(&label)));
+                let padding = " ".repeat(label_width.saturating_sub(measure_text_width(&label)));
                 let offset = format_start_offset(link.start_offset_ms);
 
                 Style::new()
@@ -107,9 +106,7 @@ fn probe_frame_rate(video_path: &Path) -> anyhow::Result<f64> {
         ])
         .arg(video_path)
         .output()
-        .with_context(|| {
-            format!("Could not run ffprobe for {}", video_path.display())
-        })?;
+        .with_context(|| format!("Could not run ffprobe for {}", video_path.display()))?;
 
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr);
@@ -125,9 +122,7 @@ fn probe_frame_rate(video_path: &Path) -> anyhow::Result<f64> {
 
     let (numerator, denominator) = frame_rate
         .split_once('/')
-        .ok_or_else(|| anyhow::anyhow!(
-            "Unexpected ffprobe frame rate: {frame_rate}"
-        ))?;
+        .ok_or_else(|| anyhow::anyhow!("Unexpected ffprobe frame rate: {frame_rate}"))?;
 
     let numerator: f64 = numerator.parse()?;
     let denominator: f64 = denominator.parse()?;
@@ -139,9 +134,7 @@ fn probe_frame_rate(video_path: &Path) -> anyhow::Result<f64> {
     Ok(numerator / denominator)
 }
 
-fn timecode_to_milliseconds(
-    input: &str, frame_rate: f64
-) -> anyhow::Result<i64> {
+fn timecode_to_milliseconds(input: &str, frame_rate: f64) -> anyhow::Result<i64> {
     let (negative, input) = match input.strip_prefix('-') {
         Some(input) => (true, input),
         None => (false, input),
@@ -159,9 +152,7 @@ fn timecode_to_milliseconds(
     let (hours, minutes, seconds, frames) = match fields.as_slice() {
         [seconds, frames] => (0, 0, *seconds, *frames),
         [minutes, seconds, frames] => (0, *minutes, *seconds, *frames),
-        [hours, minutes, seconds, frames] => {
-            (*hours, *minutes, *seconds, *frames)
-        }
+        [hours, minutes, seconds, frames] => (*hours, *minutes, *seconds, *frames),
 
         _ => bail!(
             "Use milliseconds or timecode formatted as \
@@ -189,10 +180,13 @@ fn timecode_to_milliseconds(
     let whole_seconds = hours * 3600 + minutes * 60 + seconds;
     let total_frames = whole_seconds * nominal_frame_rate + frames;
 
-    let milliseconds =
-        ((total_frames as f64 / frame_rate) * 1000.0).round() as i64;
+    let milliseconds = ((total_frames as f64 / frame_rate) * 1000.0).round() as i64;
 
-    Ok(if negative { -milliseconds } else { milliseconds })
+    Ok(if negative {
+        -milliseconds
+    } else {
+        milliseconds
+    })
 }
 
 fn format_start_offset(milliseconds: i64) -> String {
@@ -212,8 +206,7 @@ fn match_key(value: &str) -> String {
 fn title_from_pv_stem(stem: &str) -> &str {
     match stem.split_once(' ') {
         Some((prefix, title))
-            if !prefix.is_empty() &&
-                prefix.chars().all(|character| character.is_ascii_digit()) =>
+            if !prefix.is_empty() && prefix.chars().all(|character| character.is_ascii_digit()) =>
         {
             title
         }
@@ -295,7 +288,9 @@ fn main() -> anyhow::Result<()> {
 
     loop {
         let song = choose_song(&album, &mut client, &pv_candidates)?;
-        let Some(song) = song else { break; };
+        let Some(song) = song else {
+            break;
+        };
         annotate_song(&song)?;
     }
 
@@ -332,7 +327,7 @@ fn choose_directory(parent: &Path, prompt: &str) -> anyhow::Result<PathBuf> {
 fn choose_album(
     artist: &Path,
     mpd_client: &mut MpdClient,
-    pv_candidates: &PvCandidates
+    pv_candidates: &PvCandidates,
 ) -> anyhow::Result<PathBuf> {
     let mut pv_directory_name = artist.file_name().unwrap_or_default().to_os_string();
     pv_directory_name.push(" [pv]");
@@ -410,11 +405,9 @@ fn choose_album(
                     .apply_to(name)
                     .to_string(),
 
-                AlbumPvStatus::Associated => Style::new()
-                    .for_stderr()
-                    .blue()
-                    .apply_to(name)
-                    .to_string(),
+                AlbumPvStatus::Associated => {
+                    Style::new().for_stderr().blue().apply_to(name).to_string()
+                }
 
                 AlbumPvStatus::Unavailable => name,
             };
@@ -436,16 +429,22 @@ fn album_pv_status(songs: &[SongChoice]) -> AlbumPvStatus {
     if songs
         .iter()
         .any(|song| matches!(&song.pv_match, PvMatch::Ready(_)))
-    { AlbumPvStatus::Ready } else if songs
+    {
+        AlbumPvStatus::Ready
+    } else if songs
         .iter()
         .any(|song| matches!(&song.pv_match, PvMatch::Associated(_)))
-    {AlbumPvStatus::Associated} else { AlbumPvStatus::Unavailable }
+    {
+        AlbumPvStatus::Associated
+    } else {
+        AlbumPvStatus::Unavailable
+    }
 }
 
 fn load_song_choices(
     album: &Path,
     client: &mut MpdClient,
-    pv_candidates: &PvCandidates
+    pv_candidates: &PvCandidates,
 ) -> anyhow::Result<Vec<SongChoice>> {
     let mut songs: Vec<PathBuf> = fs::read_dir(album)?
         .filter_map(Result::ok)
@@ -453,13 +452,11 @@ fn load_song_choices(
         .filter(|path| {
             path.is_file()
                 && !path
-                .file_name()
-                .is_some_and(|name|
-                    name.to_string_lossy().starts_with('.'))
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with('.'))
                 && path
-                .extension()
-                .is_some_and(|extension|
-                    extension.eq_ignore_ascii_case("mp3"))
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("mp3"))
         })
         .collect();
 
@@ -497,7 +494,7 @@ fn load_song_choices(
                 uri,
                 title,
                 track,
-                pv_match
+                pv_match,
             })
         })
         .collect()
@@ -570,10 +567,7 @@ fn annotate_song(song: &SongChoice) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn annotate_ready_song(
-    song: &SongChoice,
-    video_path: &Path
-) -> anyhow::Result<()> {
+fn annotate_ready_song(song: &SongChoice, video_path: &Path) -> anyhow::Result<()> {
     let pv_filename = video_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -586,8 +580,7 @@ fn annotate_ready_song(
         .with_prompt("Song start: ms or [hh:]mm:ss:ff")
         .interact_text()?;
 
-    let start_offset_ms =
-        parse_start_offset(&start_offset_input, video_path)?;
+    let start_offset_ms = parse_start_offset(&start_offset_input, video_path)?;
 
     println!();
     println!("MPD song: {}", song.uri);
@@ -599,13 +592,13 @@ fn annotate_ready_song(
         .default(false)
         .interact()?;
 
-    if !confirmed{
+    if !confirmed {
         println!("No changes made.");
         return Ok(());
     }
 
-    let mut client = MpdClient::connect(MPD_ADDRESS)
-        .context("Couldn't connect to MPD to write stickers")?;
+    let mut client =
+        MpdClient::connect(MPD_ADDRESS).context("Couldn't connect to MPD to write stickers")?;
 
     client.set_sticker(&song.uri, "pv", pv_filename)?;
     client.set_sticker(&song.uri, "pv_in_ms", &start_offset_ms.to_string())?;

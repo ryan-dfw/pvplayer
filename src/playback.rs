@@ -23,36 +23,43 @@ enum VideoState {
 struct UpcomingPv {
     target_song_id: u32,
     link: PvLink,
-    prepared: bool
+    prepared: bool,
 }
 
 #[derive(Debug)]
 struct ActivePv {
     target_song_id: u32,
     start_offset_ms: i64,
-    video_state: VideoState
+    video_state: VideoState,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum NextSongUpdate {
     Unchanged,
     Load(u32),
-    NoNextSong
+    NoNextSong,
 }
 
 #[derive(Debug, PartialEq)]
 enum PlaybackAction {
-    Start{
+    Start {
         target_song_id: u32,
-        start_offset_ms: i64
+        start_offset_ms: i64,
     },
     Switch {
         path: PathBuf,
         target_song_id: u32,
-        start_offset_ms: i64
+        start_offset_ms: i64,
     },
-    Pause { seek_to: Option<f64> },
-    Resume
+    Pause {
+        seek_to: Option<f64>,
+    },
+    Resume,
+}
+
+enum MpdEvent {
+    Changed,
+    Failed(anyhow::Error),
 }
 
 #[derive(Debug)]
@@ -60,7 +67,7 @@ struct PlaybackController {
     previous_next_id: Option<u32>,
     previous_display: String,
     active: Option<ActivePv>,
-    upcoming: Option<UpcomingPv>
+    upcoming: Option<UpcomingPv>,
 }
 
 impl PlaybackController {
@@ -69,14 +76,11 @@ impl PlaybackController {
             previous_next_id: None,
             previous_display: String::new(),
             active: None,
-            upcoming: None
+            upcoming: None,
         }
     }
 
-    fn observe_next_song(
-        &mut self,
-        status: &Status
-    ) -> NextSongUpdate {
+    fn observe_next_song(&mut self, status: &Status) -> NextSongUpdate {
         let active_is_relevant = self.active.as_ref().is_some_and(|active| {
             Some(active.target_song_id) == status.song_id
                 || Some(active.target_song_id) == status.next_song_id
@@ -97,7 +101,7 @@ impl PlaybackController {
 
         match status.next_song_id {
             Some(id) => NextSongUpdate::Load(id),
-            None => NextSongUpdate::NoNextSong
+            None => NextSongUpdate::NoNextSong,
         }
     }
 
@@ -105,12 +109,7 @@ impl PlaybackController {
         self.active.is_none()
     }
 
-    fn stage(
-        &mut self,
-        target_song_id: u32,
-        link: PvLink,
-        prepared: bool,
-    ) {
+    fn stage(&mut self, target_song_id: u32, link: PvLink, prepared: bool) {
         self.upcoming = Some(UpcomingPv {
             target_song_id,
             link,
@@ -126,7 +125,7 @@ impl PlaybackController {
         Some(seconds_until_pv(
             duration,
             elapsed,
-            upcoming.link.start_offset_ms
+            upcoming.link.start_offset_ms,
         ))
     }
 
@@ -178,16 +177,11 @@ impl PlaybackController {
         Some(display)
     }
 
-    fn next_action(
-        &mut self,
-        status: &Status,
-    ) -> Option<PlaybackAction> {
-        let should_start = matches!(
-        &status.state,
-        Some(PlaybackState::Playing)
-    ) && self
-            .staged_seconds_until_start(status)
-            .is_some_and(|remaining| remaining <= 0.0);
+    fn next_action(&mut self, status: &Status) -> Option<PlaybackAction> {
+        let should_start = matches!(&status.state, Some(PlaybackState::Playing))
+            && self
+                .staged_seconds_until_start(status)
+                .is_some_and(|remaining| remaining <= 0.0);
 
         if should_start {
             let upcoming = self.upcoming.take()?;
@@ -209,7 +203,7 @@ impl PlaybackController {
             return Some(if prepared {
                 PlaybackAction::Start {
                     target_song_id,
-                    start_offset_ms
+                    start_offset_ms,
                 }
             } else {
                 PlaybackAction::Switch {
@@ -223,27 +217,22 @@ impl PlaybackController {
         match (self.active.as_mut(), &status.state) {
             (
                 Some(ActivePv {
-                         target_song_id,
-                         start_offset_ms,
-                         video_state,
-                     }),
+                    target_song_id,
+                    start_offset_ms,
+                    video_state,
+                }),
                 Some(PlaybackState::Paused),
             ) if *video_state == VideoState::Playing => {
-                let seek_to = intended_video_position(
-                    status,
-                    *target_song_id,
-                    *start_offset_ms,
-                );
+                let seek_to = intended_video_position(status, *target_song_id, *start_offset_ms);
 
                 *video_state = VideoState::Paused;
 
                 Some(PlaybackAction::Pause { seek_to })
             }
 
-            (
-                Some(ActivePv { video_state, .. }),
-                Some(PlaybackState::Playing),
-            ) if *video_state == VideoState::Paused => {
+            (Some(ActivePv { video_state, .. }), Some(PlaybackState::Playing))
+                if *video_state == VideoState::Paused =>
+            {
                 *video_state = VideoState::Playing;
                 Some(PlaybackAction::Resume)
             }
@@ -253,9 +242,119 @@ impl PlaybackController {
     }
 }
 
-enum MpdEvent {
-    Changed,
-    Failed(anyhow::Error),
+pub fn run() -> Result<()> {
+    let mut client = MpdClient::connect("localhost:6600")?;
+    let mpd_events = start_mpd_event_listener("localhost:6600")?;
+    let mut mpv = Mpv::start()?;
+    let mut controller = PlaybackController::new();
+
+    loop {
+        let status = client.get_status()?;
+
+        match controller.observe_next_song(&status) {
+            NextSongUpdate::Unchanged => {}
+
+            NextSongUpdate::Load(id) => {
+                let song = client.get_song(id)?;
+
+                println!("Next up: {}", song.title.as_deref().unwrap_or(&song.file));
+
+                let stickers = client.get_stickers(&song.file)?;
+
+                if let Some(link) = PvLink::from_stickers(&song.file, &stickers) {
+                    let prepared = controller.can_preload();
+
+                    if prepared {
+                        println!("Preloading PV: {}", link.path.display());
+                        mpv.load_paused(&link.path)?;
+                    } else {
+                        println!("Queuing PV behind active video: {}", link.path.display());
+                    }
+
+                    controller.stage(id, link, prepared);
+                } else {
+                    println!("No playable PV link");
+                }
+            }
+
+            NextSongUpdate::NoNextSong => {
+                println!("No next song reported");
+            }
+        }
+
+        if let Some(display) = controller.display_update(&status) {
+            println!("{}", display);
+        }
+
+        if let Some(action) = controller.next_action(&status) {
+            match action {
+                PlaybackAction::Start {
+                    target_song_id,
+                    start_offset_ms,
+                } => {
+                    let refreshed_status = client.get_status()?;
+
+                    if let Some(position) =
+                        intended_video_position(&refreshed_status, target_song_id, start_offset_ms)
+                    {
+                        mpv.seek_absolute(position)?;
+                        println!("Correcting initial PV to {position:.3} seconds");
+                    }
+                    mpv.play()?;
+                    println!("Started PV");
+                }
+
+                PlaybackAction::Switch {
+                    path,
+                    target_song_id,
+                    start_offset_ms,
+                } => {
+                    mpv.load_paused(&path)?;
+
+                    let refreshed_status = client.get_status()?;
+
+                    if let Some(position) =
+                        intended_video_position(&refreshed_status, target_song_id, start_offset_ms)
+                    {
+                        mpv.seek_absolute(position)?;
+                    }
+
+                    mpv.play()?;
+                    println!("Switched to consecutive PV");
+                }
+
+                PlaybackAction::Pause { seek_to } => {
+                    mpv.pause()?;
+
+                    if let Some(position) = seek_to {
+                        mpv.seek_absolute(position)?;
+                    }
+
+                    println!("Paused PV");
+                }
+
+                PlaybackAction::Resume => {
+                    mpv.play()?;
+                    println!("Resumed PV");
+                }
+            }
+        }
+
+        let next_check_delay = controller.next_check_delay(&status);
+        match mpd_events.recv_timeout(next_check_delay) {
+            Ok(MpdEvent::Changed) => {}
+
+            Ok(MpdEvent::Failed(err)) => {
+                return Err(err);
+            }
+
+            Err(RecvTimeoutError::Timeout) => {}
+
+            Err(RecvTimeoutError::Disconnected) => {
+                anyhow::bail!("MPD event listener stopped unexpectedly")
+            }
+        }
+    }
 }
 
 fn start_mpd_event_listener(address: &str) -> Result<mpsc::Receiver<MpdEvent>> {
@@ -298,135 +397,11 @@ fn intended_video_position(
 
     (position >= 0.0).then_some(position)
 }
-
-pub fn run() -> Result<()> {
-    let mut client = MpdClient::connect("localhost:6600")?;
-    let mpd_events = start_mpd_event_listener("localhost:6600")?;
-    let mut mpv = Mpv::start()?;
-    let mut controller = PlaybackController::new();
-
-    loop {
-        let status = client.get_status()?;
-
-        match controller.observe_next_song(&status) {
-            NextSongUpdate::Unchanged => {}
-
-            NextSongUpdate::Load(id) => {
-                let song = client.get_song(id)?;
-
-                println!("Next up: {}", song.title.as_deref().unwrap_or(&song.file));
-
-                let stickers = client.get_stickers(&song.file)?;
-
-                if let Some(link) = PvLink::from_stickers(&song.file, &stickers){
-                    let prepared = controller.can_preload();
-
-                    if prepared {
-                        println!("Preloading PV: {}", link.path.display());
-                        mpv.load_paused(&link.path)?;
-                    } else {
-                        println!(
-                            "Queuing PV behind active video: {}",
-                            link.path.display()
-                        );
-                    }
-
-                    controller.stage(id, link, prepared);
-
-                } else {
-                    println!("No playable PV link");
-                }
-            }
-
-            NextSongUpdate::NoNextSong => {
-                println!("No next song reported");
-            }
-        }
-
-        if let Some(display) = controller.display_update(&status) {
-            println!("{}", display);
-        }
-
-        if let Some(action) = controller.next_action(&status) {
-            match action {
-                PlaybackAction::Start {
-                    target_song_id,
-                    start_offset_ms
-                } => {
-                    let refreshed_status = client.get_status()?;
-
-                    if let Some(position) = intended_video_position(
-                        &refreshed_status,
-                        target_song_id,
-                        start_offset_ms
-                    ) {
-                        mpv.seek_absolute(position)?;
-                        println!("Correcting initial PV to {position:.3} seconds");
-                    }
-                    mpv.play()?;
-                    println!("Started PV");
-                }
-
-                PlaybackAction::Switch {
-                    path,
-                    target_song_id,
-                    start_offset_ms
-                } => {
-                    mpv.load_paused(&path)?;
-
-                    let refreshed_status = client.get_status()?;
-
-                    if let Some(position) = intended_video_position(
-                        &refreshed_status,
-                        target_song_id,
-                        start_offset_ms
-                    ) {
-                        mpv.seek_absolute(position)?;
-                    }
-
-                    mpv.play()?;
-                    println!("Switched to consecutive PV");
-                }
-
-                PlaybackAction::Pause { seek_to } => {
-                    mpv.pause()?;
-
-                    if let Some(position) = seek_to {
-                        mpv.seek_absolute(position)?;
-                    }
-
-                    println!("Paused PV");
-                }
-
-                PlaybackAction::Resume => {
-                    mpv.play()?;
-                    println!("Resumed PV");
-                }
-            }
-        }
-
-        let next_check_delay = controller.next_check_delay(&status);
-        match mpd_events.recv_timeout(next_check_delay) {
-            Ok(MpdEvent::Changed) => {}
-
-            Ok(MpdEvent::Failed(err)) => {
-                return Err(err);
-            }
-
-            Err(RecvTimeoutError::Timeout) => {}
-
-            Err(RecvTimeoutError::Disconnected) => {
-                anyhow::bail!("MPD event listener stopped unexpectedly")
-            }
-        }
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::{
-        ActivePv, NextSongUpdate, PlaybackAction,
-        PlaybackController, VideoState,
-        intended_video_position
+        ActivePv, NextSongUpdate, PlaybackAction, PlaybackController, VideoState,
+        intended_video_position,
     };
     use crate::mpd::{PlaybackState, Status};
     use crate::pv_link::PvLink;
@@ -505,7 +480,9 @@ mod tests {
         assert!(matches!(
             controller.active,
             Some(ActivePv {
-                target_song_id: 42, start_offset_ms, ..
+                target_song_id: 42,
+                start_offset_ms,
+                ..
             })
         ));
     }
@@ -517,7 +494,7 @@ mod tests {
         controller.active = Some(ActivePv {
             target_song_id: 42,
             start_offset_ms: 3_000,
-            video_state: VideoState::Playing
+            video_state: VideoState::Playing,
         });
 
         let status = Status {
@@ -544,7 +521,7 @@ mod tests {
                 start_offset_ms: 3_000,
                 video_cutoff_ms: None,
             },
-            true
+            true,
         );
 
         let ready_to_start = Status {
@@ -556,7 +533,7 @@ mod tests {
 
         assert_eq!(
             controller.next_action(&ready_to_start),
-            Some(PlaybackAction::Start{
+            Some(PlaybackAction::Start {
                 target_song_id: 42,
                 start_offset_ms: 3_000
             }),
@@ -606,7 +583,7 @@ mod tests {
                 start_offset_ms: 3_000,
                 video_cutoff_ms: None,
             },
-            false
+            false,
         );
 
         assert!(controller.active.is_some());
@@ -622,21 +599,21 @@ mod tests {
         };
 
         assert_eq!(
-        controller.next_action(&ready_to_switch),
-        Some(PlaybackAction::Switch {
-            path: upcoming_path,
-            target_song_id: 99,
-            start_offset_ms: 3_000,
-        }),
-    );
+            controller.next_action(&ready_to_switch),
+            Some(PlaybackAction::Switch {
+                path: upcoming_path,
+                target_song_id: 99,
+                start_offset_ms: 3_000,
+            }),
+        );
 
         assert!(controller.upcoming.is_none());
         assert!(matches!(
-        controller.active,
-        Some(ActivePv {
-            target_song_id: 99,
-            ..
-        })
-    ));
+            controller.active,
+            Some(ActivePv {
+                target_song_id: 99,
+                ..
+            })
+        ));
     }
 }
