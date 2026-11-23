@@ -4,9 +4,9 @@ Plays music videos in sync with [MPD](https://www.musicpd.org), so an album flow
 
 ```mermaid
 flowchart LR
-    client["MPD client"] -- "play · skip" --> mpd["MPD<br/>audio"]
-    mpd -. "idle · status · stickers" .-> pv["pvplay<br/>scheduler"]:::mine
-    pv -- "load · seek · play" --> mpv["mpv<br/>muted video"]
+    client["MPD client<br/>e.g. rmpc"] --> mpd["MPD<br/>audio"]
+    mpd --> pv["pvplay<br/>scheduler"]:::mine
+    pv --> mpv["mpv<br/>video"]
     classDef mine stroke:#e8590c,stroke-width:3px
 ```
 
