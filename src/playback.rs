@@ -8,7 +8,7 @@ use crate::mpv::Mpv;
 use crate::pv_link::PvLink;
 use crate::timing::seconds_until_pv;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 const START_TIMING_RESOLUTION: Duration = Duration::from_millis(20);
 const MAX_RECHECK_INTERVAL: Duration = Duration::from_secs(15);
@@ -42,6 +42,12 @@ enum NextSongUpdate {
 
 #[derive(Debug, PartialEq)]
 enum PlaybackAction {
+    JoinCurrent {
+        path: PathBuf,
+        target_song_id: u32,
+        start_offset_ms: i64,
+        should_play: bool,
+    },
     Start {
         target_song_id: u32,
         start_offset_ms: i64,
@@ -64,6 +70,7 @@ enum MpdEvent {
 
 #[derive(Debug)]
 struct PlaybackController {
+    previous_song_id: Option<u32>,
     previous_next_id: Option<u32>,
     previous_display: String,
     active: Option<ActivePv>,
@@ -73,11 +80,70 @@ struct PlaybackController {
 impl PlaybackController {
     fn new() -> Self {
         Self {
+            previous_song_id: None,
             previous_next_id: None,
             previous_display: String::new(),
             active: None,
             upcoming: None,
         }
+    }
+
+    fn current_song_to_join(&mut self, status: &Status) -> Option<u32> {
+        if status.song_id == self.previous_song_id {
+            return None;
+        }
+
+        self.previous_song_id = status.song_id;
+
+        let current_song_id = status.song_id?;
+
+        let already_active = self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.target_song_id == current_song_id);
+
+        let already_upcoming = self
+            .upcoming
+            .as_ref()
+            .is_some_and(|upcoming| upcoming.target_song_id == current_song_id);
+
+        (!already_active && !already_upcoming).then_some(current_song_id)
+    }
+
+    fn join_current_action(
+        &mut self,
+        target_song_id: u32,
+        link: PvLink,
+        status: &Status,
+    ) -> Option<PlaybackAction> {
+        intended_video_position(status, target_song_id, link.start_offset_ms)?;
+
+        let should_play = matches!(&status.state, Some(PlaybackState::Playing));
+
+        let video_state = if should_play {
+            VideoState::Playing
+        } else {
+            VideoState::Paused
+        };
+
+        let start_offset_ms = link.start_offset_ms;
+
+        self.active = Some(ActivePv {
+            target_song_id,
+            start_offset_ms,
+            video_state,
+        });
+
+        self.upcoming = None;
+        self.previous_next_id = None;
+        self.previous_display.clear();
+
+        Some(PlaybackAction::JoinCurrent {
+            path: link.path,
+            target_song_id,
+            start_offset_ms,
+            should_play,
+        })
     }
 
     fn observe_next_song(&mut self, status: &Status) -> NextSongUpdate {
@@ -251,6 +317,21 @@ pub fn run() -> Result<()> {
     loop {
         let status = client.get_status()?;
 
+        let mut pending_action = None;
+
+        if let Some(id) = controller.current_song_to_join(&status) {
+            let song = client.get_song(id)?;
+            let stickers = client.get_stickers(&song.file)?;
+
+            if let Some(link) = PvLink::from_stickers(&song.file, &stickers) {
+                pending_action = controller.join_current_action(id, link, &status);
+
+                if pending_action.is_none() {
+                    println!("Current PV has not reached its start time")
+                }
+            }
+        }
+
         match controller.observe_next_song(&status) {
             NextSongUpdate::Unchanged => {}
 
@@ -286,8 +367,31 @@ pub fn run() -> Result<()> {
             println!("{}", display);
         }
 
-        if let Some(action) = controller.next_action(&status) {
+        if let Some(action) = pending_action.or_else(|| controller.next_action(&status)) {
             match action {
+                PlaybackAction::JoinCurrent {
+                    path,
+                    target_song_id,
+                    start_offset_ms,
+                    should_play,
+                } => {
+                    mpv.load_paused(&path)?;
+
+                    let refreshed_status = client.get_status()?;
+
+                    let position =
+                        intended_video_position(&refreshed_status, target_song_id, start_offset_ms)
+                            .context("Current song changed while joining its PV")?;
+
+                    mpv.seek_absolute(position)?;
+
+                    if should_play {
+                        mpv.play()?;
+                    }
+
+                    println!("Joined current PV at {position:.3} seconds");
+                }
+
                 PlaybackAction::Start {
                     target_song_id,
                     start_offset_ms,
