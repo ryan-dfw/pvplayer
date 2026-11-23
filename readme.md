@@ -1,45 +1,38 @@
 # pvplayer
 
-> **Work in progress.** pvplayer is under active development and is not yet ready for general use.
+Plays music videos in sync with [MPD](https://www.musicpd.org), so an album flows from song into video and back without a gap. Written in Rust.
 
-pvplayer is a Rust application that plays music videos alongside music managed by [MPD](https://www.musicpd.org/).
+```mermaid
+flowchart LR
+    client["MPD client"] -- "play · skip" --> mpd["MPD<br/>audio"]
+    mpd -. "idle · status · stickers" .-> pv["pvplay<br/>scheduler"]:::mine
+    pv -- "load · seek · play" --> mpv["mpv<br/>muted video"]
+    classDef mine stroke:#e8590c,stroke-width:3px
+```
 
-MPD remains responsible for audio playback. pvplayer observes the currently playing song, looks for an associated music video in the song's MPD stickers, and opens that video in mpv with its audio disabled. The goal is to keep the video synchronized with MPD so that music can continue to be managed normally while its corresponding PV plays automatically.
+- **Decide without I/O.** The playback controller takes an MPD snapshot and returns an action, so its logic is unit-tested with no MPD or mpv running.
+- **Push, not poll.** A second MPD connection blocks on `idle` in its own thread and wakes the main loop on every change.
+- **Start before the song does.** The next video is preloaded paused, then started early by its intro length. The loop sleeps half the time left (20 ms–15 s), so it's precise at the handoff and idle otherwise.
 
-The name comes from **PV** ("promotional video"), sounds better to me than mvplayer. If this goes anywhere someone better w/ names than me can give me a better one.
+## Quick start
 
-## How it works
+Needs macOS or another Unix, Rust 1.85+, MPD with `sticker_file` set, mpv, and ffprobe.
 
-The intended flow is:
+```sh
+brew install mpd mpv ffmpeg
+cargo build --release
+cargo run --release --bin annotate   # link songs to videos, once
+cargo run --release                  # then play albums in any MPD client
+```
 
-1. MPD begins playing a song.
-2. pvplayer detects the current song and reads its associated PV metadata.
-3. pvplayer resolves and launches the video in mpv.
-4. mpv plays video only; MPD remains the audio source.
-5. pvplayer synchronizes the video's position with MPD playback.
+Set `MUSIC_ROOT` (in `src/pv_link/paths.rs` and `src/bin/annotate.rs`) to your MPD music directory. Videos live in `<Artist>/<Artist> [pv]/`.
 
-This separation is intentional: pvplayer is a companion to MPD rather than a replacement for it.
+## Docs
 
-## Current status
+Every item is documented, internals included: `cargo docs`. The crate page covers the timing model, the sticker schema and the limitations.
 
-The basic MPD → pvplayer → mpv path is working. pvplayer can identify the current song, resolve its associated video, and launch it in mpv.
+## Status
 
-Playback synchronization is currently under development. Timing behavior can vary between machines, so synchronization may require accounting for machine-specific playback latency.
+`0.0.0-alpha.1`. Built for my own listening, tested on one Mac. Documentation drafted with AI assistance; code written by me.
 
-## Goals
-
-- Automatically play the PV associated with the current MPD song.
-- Keep video playback synchronized with MPD without replacing MPD as the audio source.
-- Build something I personally want to use.
-- Learn Rust through a practical systems project.
-- Make the project usable by others if development reaches that point.
-
-## Development
-
-This is primarily a personal-use and learning project. Interfaces, configuration, metadata conventions, and implementation details may change while it is under development.
-
-Setup and usage documentation will be added once the application is stable enough for general use.
-
-## AI assistance
-
-This readme was written by chatGPT except for this note. If the project seems viable i'll replace everything with proper docs; for now just looking to save progress while i work.
+Licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
