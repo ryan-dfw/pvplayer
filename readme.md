@@ -29,7 +29,7 @@ Set `MUSIC_ROOT` (in `src/pv_link/paths.rs` and `src/bin/annotate.rs`) to your M
 
 ## Docs
 
-Every item is documented, internals included: `cargo docs`. The crate page covers the timing model, the sticker schema and the limitations.
+**[ryan-dfw.github.io/pvplayer](https://ryan-dfw.github.io/pvplayer/)**: every item documented, internals included, covering the timing model, sticker schema and limitations. Locally: `cargo docs`.
 
 ## Status
 
