@@ -1,3 +1,45 @@
+//! `annotate`: links songs to their music videos, interactively.
+//!
+//! Walks you through **Artist → Album → Song** with fuzzy-search pickers,
+//! finds each song's video in the artist's `[pv]` folder by title, and
+//! writes the `pv` and `pv_in_ms` stickers to MPD once you enter the sync
+//! offset. See [Sticker schema](../pvplay/index.html#sticker-schema).
+//!
+//! # Usage
+//!
+//! ```sh
+//! cargo run --release --bin annotate
+//! ```
+//!
+//! Pick an artist, then an album, then songs one at a time; press Esc in
+//! the song list to quit. For a song with a matching video, enter the
+//! offset as milliseconds (`4210`, `-350`) or timecode (`[hh:]mm:ss:ff`,
+//! read at the video's frame rate via `ffprobe`), then confirm.
+//!
+//! # Colors
+//!
+//! | Color  | Song list                                   | Album list                   |
+//! |--------|---------------------------------------------|------------------------------|
+//! | Orange | One matching video found, not yet linked    | Has at least one orange song |
+//! | Blue   | Already linked (offset shown)               | Has linked songs, no orange  |
+//! | Red    | Several videos match; nothing will be done  | (not shown)                  |
+//! | Plain  | No matching video                           | Nothing to do or done        |
+//!
+//! # Matching
+//!
+//! A video matches a song when their titles are equal after lowercasing
+//! and dropping everything but letters and digits. The song's title is its
+//! ID3 title (or file name); the video's is its file name, minus any
+//! leading track number (`03 Song.mp4` → `Song`). Only `.mp3` audio and
+//! `.mp4` video are considered; hidden files are skipped.
+//!
+//! # Notes
+//!
+//! - Every song shown must be in MPD's database (`mpc update`), or the
+//!   sticker lookup fails and `annotate` exits.
+//! - A song that is already linked can't be relinked here; change its
+//!   stickers with an MPD client instead.
+
 use anyhow::{Context, bail};
 use dialoguer::{
     Confirm, FuzzySelect, Input,
@@ -10,36 +52,59 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// The music library root, with a trailing slash so stripping it leaves an
+/// MPD-style relative URI.
+///
+/// > **Note:** machine-specific. Must match `music_directory` in `mpd.conf`.
 const MUSIC_ROOT: &str = "/Volumes/Elm_SSD/0/iTunes Media/Music/";
+/// Where MPD listens.
 const MPD_ADDRESS: &str = "localhost:6600";
 
+/// An artist's videos, keyed by [`match_key`] of their title. A key with
+/// more than one path is ambiguous.
 type PvCandidates = HashMap<String, Vec<PathBuf>>;
 
+/// How a song relates to the artist's videos.
 #[derive(Debug)]
 enum PvMatch {
+    /// Already linked by stickers (shown blue).
     Associated(PvLink),
+    /// Exactly one video matches and it isn't linked yet (shown orange).
     Ready(PathBuf),
+    /// No video matches (shown plain).
     Unavailable,
+    /// Several videos match; the song is left alone (shown red).
     Ambiguous(Vec<PathBuf>),
 }
 
+/// One song in the song picker.
 #[derive(Debug)]
 struct SongChoice {
+    /// Full path to the `.mp3`.
     audio_path: PathBuf,
+    /// Path relative to [`MUSIC_ROOT`]: the MPD URI used for stickers.
     uri: String,
+    /// ID3 title, or the file name if untagged.
     title: String,
+    /// ID3 track number, if tagged.
     track: Option<u32>,
+    /// Its video status.
     pv_match: PvMatch,
 }
 
+/// An album's color in the album picker, from its songs' [`PvMatch`]es.
 #[derive(Debug)]
 enum AlbumPvStatus {
+    /// At least one song is [`PvMatch::Ready`] (shown orange).
     Ready,
+    /// No ready songs, but at least one is linked (shown blue).
     Associated,
+    /// Nothing to link and nothing linked (shown plain).
     Unavailable,
 }
 
 impl SongChoice {
+    /// The song's base label: `NN- Title` when it has a track number.
     fn label(&self) -> String {
         match self.track {
             Some(number) => format!("{number:02}- {}", self.title),
@@ -47,6 +112,8 @@ impl SongChoice {
         }
     }
 
+    /// The label as shown in the picker: colored by [`PvMatch`], with linked
+    /// songs' offsets aligned in a column `label_width` wide.
     fn display_name(&self, label_width: usize) -> String {
         let label = self.label();
 
@@ -79,6 +146,13 @@ impl SongChoice {
     }
 }
 
+/// Parses offset input as milliseconds, or as timecode if it contains `:`.
+///
+/// # Errors
+///
+/// Returns an error if a millisecond value isn't a whole number, or for
+/// timecode, if the frame rate can't be probed (see [`probe_frame_rate`])
+/// or the timecode is invalid (see [`timecode_to_milliseconds`]).
 fn parse_start_offset(input: &str, video_path: &Path) -> anyhow::Result<i64> {
     let input = input.trim();
 
@@ -92,6 +166,12 @@ fn parse_start_offset(input: &str, video_path: &Path) -> anyhow::Result<i64> {
     timecode_to_milliseconds(input, frame_rate)
 }
 
+/// The average frame rate of the video's first video stream, via `ffprobe`.
+///
+/// # Errors
+///
+/// Returns an error if `ffprobe` can't be run (e.g. not installed) or
+/// fails, or its output isn't a positive `num/den` rate.
 fn probe_frame_rate(video_path: &Path) -> anyhow::Result<f64> {
     let output = Command::new("ffprobe")
         .args([
@@ -134,6 +214,18 @@ fn probe_frame_rate(video_path: &Path) -> anyhow::Result<f64> {
     Ok(numerator / denominator)
 }
 
+/// Converts `ss:ff`, `mm:ss:ff` or `hh:mm:ss:ff` timecode (optionally
+/// negative) to milliseconds.
+///
+/// Frames are counted at the rounded ("nominal") rate, e.g. 30 for
+/// 29.97 fps, then converted using the real rate. That matches
+/// non-drop-frame timecode; drop-frame timecode will be slightly off.
+///
+/// # Errors
+///
+/// Returns an error if a field isn't a number, there are too few or too
+/// many fields, seconds or minutes are 60 or more where a larger unit
+/// follows, or the frame number is too high for the rate.
 fn timecode_to_milliseconds(input: &str, frame_rate: f64) -> anyhow::Result<i64> {
     let (negative, input) = match input.strip_prefix('-') {
         Some(input) => (true, input),
@@ -189,12 +281,14 @@ fn timecode_to_milliseconds(input: &str, frame_rate: f64) -> anyhow::Result<i64>
     })
 }
 
+/// Formats an offset for the song picker, e.g. `in: 0420ms` or `in:-0350ms`.
 fn format_start_offset(milliseconds: i64) -> String {
     let sign = if milliseconds < 0 { '-' } else { ' ' };
     let magnitude = milliseconds.unsigned_abs();
     format!("in:{sign}{magnitude:04}ms")
 }
 
+/// A title reduced for matching: lowercase letters and digits only.
 fn match_key(value: &str) -> String {
     value
         .chars()
@@ -203,6 +297,8 @@ fn match_key(value: &str) -> String {
         .collect()
 }
 
+/// A video's title from its file stem, without a leading track number
+/// (`03 Song` → `Song`).
 fn title_from_pv_stem(stem: &str) -> &str {
     match stem.split_once(' ') {
         Some((prefix, title))
@@ -214,6 +310,12 @@ fn title_from_pv_stem(stem: &str) -> &str {
     }
 }
 
+/// Collects the `.mp4` files in `artist`'s `[pv]` folder, keyed by title.
+/// An artist with no `[pv]` folder has no candidates.
+///
+/// # Errors
+///
+/// Returns an error if the `[pv]` folder or an entry in it can't be read.
 fn load_pv_candidates(artist: &Path) -> anyhow::Result<PvCandidates> {
     let artist_name = artist
         .file_name()
@@ -257,6 +359,8 @@ fn load_pv_candidates(artist: &Path) -> anyhow::Result<PvCandidates> {
     Ok(candidates)
 }
 
+/// Decides a song's [`PvMatch`]: existing stickers win; otherwise its
+/// title is looked up among the candidates.
 fn match_pv(
     song_uri: &str,
     title: &str,
@@ -278,6 +382,14 @@ fn match_pv(
     }
 }
 
+/// Runs the Artist → Album → Song pickers, annotating songs until the
+/// song picker is dismissed.
+///
+/// # Errors
+///
+/// Returns an error if a folder can't be read, MPD is unreachable or
+/// rejects a command, a prompt fails (e.g. no terminal), or writing
+/// stickers fails.
 fn main() -> anyhow::Result<()> {
     let root = Path::new(MUSIC_ROOT);
     let artist = choose_directory(root, "Artist")?;
@@ -297,6 +409,11 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Fuzzy-picks one of `parent`'s visible subfolders, sorted by name.
+///
+/// # Errors
+///
+/// Returns an error if `parent` can't be read or the prompt fails.
 fn choose_directory(parent: &Path, prompt: &str) -> anyhow::Result<PathBuf> {
     let mut directories: Vec<PathBuf> = fs::read_dir(parent)?
         .filter_map(Result::ok)
@@ -324,6 +441,16 @@ fn choose_directory(parent: &Path, prompt: &str) -> anyhow::Result<PathBuf> {
     Ok(directories[selection].clone())
 }
 
+/// Fuzzy-picks one of `artist`'s albums, colored by [`AlbumPvStatus`].
+///
+/// Albums are sorted by the album sort tag (`TSOA`/`TSA`) of their first
+/// readable `.mp3`, falling back to the folder name. Coloring loads every
+/// album's songs and stickers up front.
+///
+/// # Errors
+///
+/// Returns an error if a folder can't be read, any album's songs fail to
+/// load (see [`load_song_choices`]), or the prompt fails.
 fn choose_album(
     artist: &Path,
     mpd_client: &mut MpdClient,
@@ -356,6 +483,7 @@ fn choose_album(
                     || !path
                         .extension()
                         .is_some_and(|ext| ext.eq_ignore_ascii_case("mp3"))
+                    // `._` files are macOS metadata twins on non-Apple volumes.
                     || path
                         .file_name()
                         .is_some_and(|name| name.to_string_lossy().starts_with("._"))
@@ -425,6 +553,7 @@ fn choose_album(
     Ok(albums[selection].clone())
 }
 
+/// An album's color: orange beats blue beats plain.
 fn album_pv_status(songs: &[SongChoice]) -> AlbumPvStatus {
     if songs
         .iter()
@@ -441,6 +570,14 @@ fn album_pv_status(songs: &[SongChoice]) -> AlbumPvStatus {
     }
 }
 
+/// The album's `.mp3` files, sorted by file name, each with its title,
+/// track number, MPD URI and [`PvMatch`].
+///
+/// # Errors
+///
+/// Returns an error if the album can't be read, a file is outside
+/// [`MUSIC_ROOT`], or MPD's sticker lookup fails (e.g. the file isn't in
+/// MPD's database).
 fn load_song_choices(
     album: &Path,
     client: &mut MpdClient,
@@ -500,6 +637,12 @@ fn load_song_choices(
         .collect()
 }
 
+/// Fuzzy-picks a song from `album`. Returns `None` when the picker is
+/// dismissed (Esc), which ends the session.
+///
+/// # Errors
+///
+/// Returns an error if the songs can't be loaded or the prompt fails.
 fn choose_song(
     album: &Path,
     client: &mut MpdClient,
@@ -532,6 +675,12 @@ fn choose_song(
     Ok(Some(choices.remove(selection)))
 }
 
+/// Acts on a picked song: links it if [`PvMatch::Ready`], otherwise just
+/// reports its status.
+///
+/// # Errors
+///
+/// Returns an error if linking fails (see [`annotate_ready_song`]).
 fn annotate_song(song: &SongChoice) -> anyhow::Result<()> {
     match &song.pv_match {
         PvMatch::Associated(link) => {
@@ -567,6 +716,14 @@ fn annotate_song(song: &SongChoice) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Prompts for the song's offset, shows the stickers to be written, and
+/// writes `pv` and `pv_in_ms` after confirmation (default: no).
+///
+/// # Errors
+///
+/// Returns an error if the video's file name isn't valid UTF-8, the offset
+/// can't be parsed, a prompt fails, or MPD can't be reached or rejects the
+/// writes.
 fn annotate_ready_song(song: &SongChoice, video_path: &Path) -> anyhow::Result<()> {
     let pv_filename = video_path
         .file_name()
@@ -597,6 +754,8 @@ fn annotate_ready_song(song: &SongChoice, video_path: &Path) -> anyhow::Result<(
         return Ok(());
     }
 
+    // Fresh connection: MPD may have dropped the old one (60 s idle
+    // timeout) while the prompts were open.
     let mut client =
         MpdClient::connect(MPD_ADDRESS).context("Couldn't connect to MPD to write stickers")?;
 

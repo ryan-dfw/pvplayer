@@ -1,3 +1,9 @@
+//! Spawns a muted mpv and controls it over its JSON IPC socket.
+//!
+//! mpv is started once, idle and paused, and reused for every video.
+//! Commands are JSON lines sent over a Unix socket; see mpv's
+//! [JSON IPC docs](https://mpv.io/manual/stable/#json-ipc).
+
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
@@ -7,16 +13,44 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use std::{fs, thread};
 
+/// Where mpv's IPC socket is created.
+///
+/// Fixed, so only one pvplayer can run at a time: [`Mpv::start`] deletes
+/// any existing socket here, cutting off another instance's mpv.
 const SOCKET_PATH: &str = "/tmp/pvplay-mpv.sock";
 
+/// A running mpv process and the IPC connection that controls it.
+///
+/// Dropping it kills mpv and removes the socket.
 pub struct Mpv {
+    /// The mpv process, kept so it can be killed on drop.
     child: Child,
+    /// The IPC connection. Replies and events arrive on it as JSON lines.
     socket: BufReader<UnixStream>,
+    /// ID for the next request; mpv echoes it back so replies can be matched.
     next_request_id: u64,
+    /// `file-loaded` events seen while waiting for other replies, counted so
+    /// [`Self::wait_until_file_loaded`] doesn't miss them.
     pending_file_loaded: usize,
 }
 
 impl Mpv {
+    /// Spawns mpv and connects to its IPC socket.
+    ///
+    /// mpv starts with no file, paused and muted (`--no-audio`), with its
+    /// keyboard shortcuts and on-screen controls disabled so the window
+    /// can't be paused or seeked by accident. Only warnings are printed.
+    ///
+    /// Waits up to about 1 s for the socket to appear. Replies are then
+    /// expected within 5 s.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - a stale socket from an earlier run can't be removed
+    /// - mpv can't be started (e.g. not installed or not on `PATH`)
+    /// - mpv doesn't create its socket within about 1 s
+    /// - the socket's timeouts can't be set
     pub fn start() -> Result<Self> {
         let socket_path = Path::new(SOCKET_PATH);
 
@@ -67,6 +101,16 @@ impl Mpv {
         })
     }
 
+    /// Loads `path`, replacing any current video, and leaves it paused at
+    /// the start. Returns once mpv reports the file loaded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - `path` is not valid UTF-8
+    /// - mpv rejects the pause or load command
+    /// - mpv never reports the file loaded (e.g. the file is missing). The
+    ///   read times out after 5 s.
     pub fn load_paused(&mut self, path: &Path) -> Result<()> {
         let path = path.to_str().context("PV path is not valid UTF-8")?;
 
@@ -82,6 +126,17 @@ impl Mpv {
         Ok(())
     }
 
+    /// Sends one command and returns mpv's reply to it.
+    ///
+    /// Events that arrive first are skipped, except `file-loaded`, which is
+    /// counted in [`Self::pending_file_loaded`]. Replies to other requests
+    /// are skipped by `request_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the socket can't be written or read (including
+    /// the 5 s timeout), mpv closes it, a reply isn't valid JSON, or mpv
+    /// answers with anything other than `success`.
     fn request(&mut self, command: Value) -> Result<Value> {
         let request_id = self.next_request_id;
         self.next_request_id += 1;
@@ -139,10 +194,21 @@ impl Mpv {
         }
     }
 
+    /// Like [`Self::request`], discarding the reply.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::request`].
     fn send(&mut self, command: Value) -> Result<()> {
         self.request(command).map(|_| ())
     }
 
+    /// Blocks until mpv emits `file-loaded`, or uses one already counted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading fails or times out after 5 s, mpv closes
+    /// the socket, or an event isn't valid JSON.
     fn wait_until_file_loaded(&mut self) -> Result<()> {
         if self.pending_file_loaded > 0 {
             self.pending_file_loaded -= 1;
@@ -174,18 +240,40 @@ impl Mpv {
         }
     }
 
+    /// Unpauses the video.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::request`].
     pub fn play(&mut self) -> Result<()> {
         self.send(json!(["set_property", "pause", false]))
     }
 
+    /// Pauses the video.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::request`].
     pub fn pause(&mut self) -> Result<()> {
         self.send(json!(["set_property", "pause", true]))
     }
 
+    /// Seeks to `seconds` into the video, frame-accurately (`absolute+exact`).
+    /// Exact seeks are slower than keyframe seeks, but land where asked.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::request`].
     pub fn seek_absolute(&mut self, seconds: f64) -> Result<()> {
         self.send(json!(["seek", seconds, "absolute+exact"]))
     }
 
+    /// The video's current position in seconds (mpv's `time-pos`).
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::request`], or if mpv's reply has no numeric position
+    /// (e.g. no file is loaded).
     pub fn time_position(&mut self) -> Result<f64> {
         let response = self.request(json!(["get_property", "time-pos"]))?;
 
@@ -194,8 +282,22 @@ impl Mpv {
             .and_then(Value::as_f64)
             .context("mpv response is missing a numeric time-pos")
     }
+
+    /// mpv's audio position in seconds (`audio-pts`), if it has one.
+    ///
+    /// Always `None` in pvplayer: mpv runs with `--no-audio`, so it has no
+    /// audio position. Used only by the diagnostic `JOIN CHECK` line.
+    pub fn audio_position(&mut self) -> Option<f64> {
+        let response = self.request(json!(["get_property", "audio-pts"])).ok()?;
+
+        response.get("data").and_then(Value::as_f64)
+    }
 }
 
+/// Kills mpv and removes its socket.
+///
+/// Doesn't run if pvplayer is killed by a signal (e.g. Ctrl-C); the
+/// leftover socket is removed by the next [`Mpv::start`].
 impl Drop for Mpv {
     fn drop(&mut self) {
         let _ = self.child.kill();

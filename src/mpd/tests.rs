@@ -1,6 +1,9 @@
+//! Parsing tests for [`Song`] and [`Status`], using hand-written MPD replies.
+
 use crate::mpd::song::Song;
 use crate::mpd::status::Status;
 
+/// A full song reply yields its file and title.
 #[test]
 fn parses_song_details() {
     let lines = vec![
@@ -15,6 +18,7 @@ fn parses_song_details() {
     assert_eq!(song.title.as_deref(), Some("Example Song"));
 }
 
+/// Sample rate and next song ID are read from a status reply.
 #[test]
 fn parses_status_fields() {
     let lines = vec![
@@ -29,6 +33,7 @@ fn parses_status_fields() {
     assert_eq!(status.next_song_id, Some(2));
 }
 
+/// Fields MPD omits stay `None` instead of failing the parse.
 #[test]
 fn missing_fields_remain_none() {
     let lines = vec![String::from("state: stop\n")];
@@ -39,6 +44,7 @@ fn missing_fields_remain_none() {
     assert_eq!(status.next_song_id, None);
 }
 
+/// A non-numeric sample rate is rejected.
 #[test]
 fn rejects_invalid_sample_rate() {
     let lines = vec![String::from("audio: nope:16:2\n")];
@@ -46,6 +52,7 @@ fn rejects_invalid_sample_rate() {
     assert!(Status::parse(&lines).is_err());
 }
 
+/// A non-numeric next song ID is rejected.
 #[test]
 fn rejects_invalid_next_song_id() {
     let lines = vec![String::from("nextsongid: nope\n")];
@@ -53,6 +60,7 @@ fn rejects_invalid_next_song_id() {
     assert!(Status::parse(&lines).is_err());
 }
 
+/// A song without a title tag is still valid.
 #[test]
 fn song_without_title_is_valid() {
     let lines = vec![String::from("file: music/untitled.mp3\n")];
@@ -63,6 +71,7 @@ fn song_without_title_is_valid() {
     assert_eq!(song.title, None);
 }
 
+/// A song reply without a file is rejected.
 #[test]
 fn song_without_file_is_rejected() {
     let lines = vec![String::from("Title: Example Song\n")];

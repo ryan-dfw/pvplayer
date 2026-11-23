@@ -1,24 +1,47 @@
+//! A snapshot of MPD's player state: what's playing, what's next, and where.
+
 use anyhow::{Context, Result};
 use std::time::Duration;
 
+/// MPD's playback state (`state:` in its status reply).
 #[derive(Debug, PartialEq, Eq)]
 pub enum PlaybackState {
+    /// `play`
     Playing,
+    /// `pause`
     Paused,
+    /// `stop`: nothing is playing, and positions are not reported.
     Stopped,
 }
 
+/// One reply to MPD's `status` command. Fields are `None` when MPD omits
+/// them (e.g. when stopped, or at the end of the queue).
 #[derive(Debug, Default)]
 pub struct Status {
+    /// Sample rate of the playing audio, in Hz (from `audio:`). Not
+    /// currently used.
     pub sample_rate_hz: Option<u32>,
+    /// `songid` of the next song in the queue (`nextsongid:`).
     pub next_song_id: Option<u32>,
+    /// `songid` of the current song (`songid:`).
     pub song_id: Option<u32>,
+    /// Playback position in the current song (`elapsed:`).
     pub elapsed: Option<Duration>,
+    /// Length of the current song (`duration:`).
     pub duration: Option<Duration>,
+    /// Whether MPD is playing, paused, or stopped (`state:`).
     pub state: Option<PlaybackState>,
 }
 
 impl Status {
+    /// Parses `status` reply lines. Fields pvplayer doesn't use are ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a used field has an unreadable value: a
+    /// non-numeric ID or time, a negative time, an unknown state, or an
+    /// `audio:` rate that isn't a number (including DSD formats such as
+    /// `dsd64:2`).
     pub(super) fn parse(lines: &[String]) -> anyhow::Result<Self> {
         let mut status = Self::default();
 
@@ -76,6 +99,11 @@ impl Status {
     }
 }
 
+/// Parses MPD's seconds-with-decimals time format (e.g. `12.345`).
+///
+/// # Errors
+///
+/// Returns an error if `value` isn't a number, or is negative or too large.
 fn parse_duration(value: &str) -> Result<Duration> {
     let seconds = value
         .trim()

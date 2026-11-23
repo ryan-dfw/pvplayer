@@ -1,0 +1,7 @@
+[alias]
+docs = "doc --no-deps --document-private-items --open"
+
+[build]
+# pvplay is documented for readers of its internals, so public items may
+# link to private ones; those links resolve with --document-private-items.
+rustdocflags = ["-A", "rustdoc::private_intra_doc_links"]

@@ -1,7 +1,14 @@
 [package]
 name = "pvplay"
-version = "0.1.0"
+version = "0.0.0-alpha.1"
 edition = "2024"
+rust-version = "1.85"
+description = "Plays music videos in mpv, synced to MPD playback"
+repository = "https://github.com/ryan-dfw/pvplay"
+readme = "readme.md"
+publish = false
+default-run = "pvplay"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 anyhow = "1.0.104"
